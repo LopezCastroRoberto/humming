@@ -30,11 +30,13 @@ CODE_TEMPLATE = jinja2.Template("""
 
 {{tuning_config_macro}}
 
-#if {{use_warp_spec}}
+{% if use_rs_w4a8 %}
+#include <humming/kernel/humming_rs_w4a8.cuh>
+{% elif use_warp_spec %}
 #include <humming/kernel/humming_ws.cuh>
-#else
+{% else %}
 #include <humming/kernel/humming.cuh>
-#endif
+{% endif %}
 
 class MmaOpClass {
 public:

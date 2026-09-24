@@ -157,6 +157,7 @@ def estimate_smem_size_layer(
     elif gemm_type in (GemmType.GROUPED_CONTIGUOUS, GemmType.GROUPED_MASKED):
         add(128, 64)  # tensor_map_buffer[1] (CUtensorMap)
         add(layer_config.num_experts * 4, 4)  # expert_tokens
+        add((layer_config.num_experts + 1) * 4, 4)  # expert_m_block_offset
         add(4, 4)  # total_m_blocks
         if gemm_type == GemmType.GROUPED_CONTIGUOUS:
             add((layer_config.num_experts + 1) * 4, 4)  # expert_offset

@@ -462,6 +462,9 @@ class TuningConfig(BaseHummingConfig):
     use_pdl: bool = False
     raster_group_m: int = 1
 
+    # Persistent, M-major MXFP4 x FP8(GS128) grouped-prefill RS path.
+    use_rs_w4a8: bool = False
+
     _cpp_extra_names: ClassVar[tuple[str, ...]] = (
         "num_threads",
         "num_math_threads",
