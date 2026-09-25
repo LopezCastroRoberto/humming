@@ -374,13 +374,6 @@ class CompressedTensorsInputSchema(BaseInputSchema):
         return HummingInputSchema(
             a_dtype=a_dtype,
             input_scale_group_size=self.group_size,
-            input_scale_dtype=(
-                dtypes.float32
-                if self.format == "mxfp4-pack-quantized"
-                and self.num_bits == 8
-                and self.group_size == 128
-                else None
-            ),
             input_quant_mode=quant_mode,
         )
 

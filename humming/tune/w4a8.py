@@ -1,7 +1,5 @@
 """Hopper MXFP4 x FP8(GS128) grouped-prefill tuning policy."""
 
-import os
-
 import torch
 
 from humming import dtypes
@@ -34,10 +32,8 @@ def _enabled(
     use_m_major_input_scale: bool,
     gemm_type: GemmType,
 ) -> bool:
-    # Preserve the existing experimental switch used by serving and benchmarks.
     return (
-        os.getenv("HUMMING_EXPERIMENTAL_RS_W4A8") == "1"
-        and gemm_type == GemmType.GROUPED_CONTIGUOUS
+        gemm_type == GemmType.GROUPED_CONTIGUOUS
         and layer_config.sm_version == 90
         and use_m_major_input_scale
         and layer_config.mma_type == MmaType.WGMMA
