@@ -19,7 +19,7 @@ from humming.tune.sm90_h20 import Sm90H20Heuristics
 from humming.tune.sm100 import Sm100Heuristics
 from humming.tune.sm120 import Sm120Heuristics
 from humming.tune.sm121 import Sm121Heuristics
-from humming.tune.w4a8 import apply_w4a8_config, specialize_w4a8_ranges
+from humming.tune.sm90_policies import apply_w4a8_config, specialize_w4a8_ranges
 
 heuristics_map: dict[int, type[DeviceHeuristics]] = {
     75: Sm75Heuristics,

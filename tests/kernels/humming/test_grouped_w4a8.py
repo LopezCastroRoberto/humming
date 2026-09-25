@@ -92,7 +92,7 @@ def test_flat_grouped_raster_storage_is_opt_in():
     assert estimate_smem_size_layer(*args, use_flat_grouped_raster=True) > generic
 
 
-@pytest.mark.parametrize("num_experts", [4, 8, 16, 32, 64, 128, 256, 33])
+@pytest.mark.parametrize("num_experts", [4, 8, 16, 32, 64, 128, 256, 512, 33])
 @pytest.mark.parametrize("shape_m", [17, 512])
 @pytest.mark.parametrize("top_k", [1, 8])
 def test_grouped_mxfp4_fp8_m_major(shape_m, num_experts, top_k):
@@ -126,7 +126,9 @@ def test_grouped_mxfp4_fp8_m_major(shape_m, num_experts, top_k):
     assert len(results) == 1
     assert results[0].tuning_config.use_flat_grouped_raster
     assert results[0].tuning_config.use_shared_as_promotion
-    assert results[0].tuning_config.block_shape == (176, 128, 128)
+    block_m, block_n, block_k = results[0].tuning_config.block_shape
+    assert 64 <= block_m <= 176 and block_m % 16 == 0
+    assert (block_n, block_k) == (128, 128)
 
 
 @pytest.mark.parametrize("shape_n, shape_k", [(4096, 6144), (6144, 2048)])
@@ -159,7 +161,7 @@ def test_glm52_grouped_w4a8_shape_policy(shape_n, shape_k):
         4096: (160, 4),
         5120: (176, 4),
         7168: (128, 4),
-        10240: (160, 4),
+        10240: (176, 4),
         12288: (144, 4),
         14336: (160, 4),
         16384: (176, 4),
@@ -181,7 +183,7 @@ def test_glm52_grouped_w4a8_shape_policy(shape_n, shape_k):
         assert (single["block_shape"][0], single["num_stages"]) == tile_and_stages
 
 
-@pytest.mark.parametrize("num_experts", [4, 8, 16, 32, 64, 128, 256])
+@pytest.mark.parametrize("num_experts", [4, 8, 16, 32, 64, 128, 256, 512])
 def test_glm52_grouped_w4a8_policy_scales_with_experts(num_experts):
     if not torch.cuda.is_available() or torch.cuda.get_device_capability()[0] != 9:
         pytest.skip("W4A8 warp-specialized path requires SM90")

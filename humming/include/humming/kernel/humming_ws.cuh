@@ -1,7 +1,6 @@
 #pragma once
 
 #include <humming/scheduler.cuh>
-#include <humming/scheduler/flat_grouped.cuh>
 #include <humming/utils/all.cuh>
 
 #include <humming/arith/epilogue_arith.cuh>
@@ -62,9 +61,7 @@ __global__ __launch_bounds__(TuningConfig::kNumThreads, TuningConfig::kNumCtasPe
       MmaOpClass, ProblemShape, BlockShape, WarpShape, PadShape,
       ElementA, ElementB, ElementC, ElementBS,
       LayerConfig, ComputeConfig, TuningConfig>;
-  using KernelScheduler = std::conditional_t<
-      TuningConfig::kUseFlatGroupedRaster,
-      FlatGroupedScheduler<Ctx>, Scheduler<Ctx>>;
+  using KernelScheduler = Scheduler<Ctx>;
   using ProducerPipeline = ProducerPipeline<Ctx>;
   using ConsumerPipeline = ConsumerPipeline<Ctx>;
   using MainloopArithmetic = MainloopArithmetic<Ctx>;
