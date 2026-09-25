@@ -7,7 +7,7 @@
 // Grouped-contiguous A and activation-scale loaders use the absolute m_offset
 // and current_shape_m fields, matching the generic scheduler interface.
 template <class Ctx>
-class RsW4a8GroupedScheduler {
+class FlatGroupedScheduler {
   using SharedStorage = typename Ctx::SharedStorage;
   using ProblemShape = typename Ctx::ProblemShape;
   using BlockShape = typename Ctx::BlockShape;
@@ -76,7 +76,13 @@ class RsW4a8GroupedScheduler {
   uint32_t slice_id = 0;
   uint32_t locks_offset = 0;
 
-  CUDA_INLINE RsW4a8GroupedScheduler(
+  CUDA_INLINE FlatGroupedScheduler(Ctx &ctx)
+      : FlatGroupedScheduler(
+            ctx.smem, ctx.params.shape_m, ctx.params.use_int64_expert_layout,
+            ctx.params.expert_layout_ptr, ctx.params.c,
+            ctx.params.tensor_map_buffer) {}
+
+  CUDA_INLINE FlatGroupedScheduler(
       SharedStorage &smem_, uint32_t shape_m,
       bool use_int64_expert_layout,
       const uint32_t *expert_layout_ptr, const void *c,

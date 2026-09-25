@@ -2,11 +2,6 @@
 
 #include <humming/utils/all.cuh>
 
-#ifndef HUMMING_USE_RS_W4A8
-#define HUMMING_USE_RS_W4A8 0
-#endif
-
-
 template <uint32_t swizzle_bytes = 128>
 CUDA_INLINE uint64_t make_wgmma_smem_desc(uint32_t addr) {
   static_assert(swizzle_bytes == 128 || swizzle_bytes == 64);
@@ -38,7 +33,7 @@ public:
   static constexpr bool kHasZeroPoint = Ctx::kHasZeroPoint;
   static constexpr bool kIsFpZeroPoint = Ctx::kIsFpZeroPoint;
   static constexpr bool kUseFusedE8m0Scale = Ctx::kUseFusedE8m0Scale;
-  static constexpr bool kUseSharedASPromotion = HUMMING_USE_RS_W4A8;
+  static constexpr bool kUseSharedASPromotion = Ctx::kUseSharedASPromotion;
 
   static constexpr uint32_t kPartMmaShapeK = 256 / ElementA::kBits;
   static constexpr uint32_t kSwizzleBytes = ElementA::kBits * BlockShape::K >= 1024 ? 128 : 64;

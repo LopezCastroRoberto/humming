@@ -462,8 +462,9 @@ class TuningConfig(BaseHummingConfig):
     use_pdl: bool = False
     raster_group_m: int = 1
 
-    # Persistent, M-major MXFP4 x FP8(GS128) grouped-prefill RS path.
-    use_rs_w4a8: bool = False
+    # Warp-specialized scheduling and GS128 scale-promotion/mainloop policies.
+    use_flat_grouped_raster: bool = False
+    use_shared_as_promotion: bool = False
 
     _cpp_extra_names: ClassVar[tuple[str, ...]] = (
         "num_threads",
@@ -478,6 +479,7 @@ class TuningConfig(BaseHummingConfig):
         "use_tma_bs": "kUseTmaBS",
         "use_tma_bs2": "kUseTmaBS2",
         "use_tma_bzp": "kUseTmaBZP",
+        "use_shared_as_promotion": "kUseSharedASPromotion",
     }
 
     def __post_init__(self):
