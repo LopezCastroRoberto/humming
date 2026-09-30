@@ -537,7 +537,9 @@ class HummingKernel(KernelRuntime, LayerConfig, ComputeConfig, TuningConfig):
 
         if self.use_packed_k_layout:
             warp_k = self.warp_shape[2]
-            for gs in (self.input_scale_group_size, self.weight_scale_group_size):
+            # Fused weight scales are applied to each B slab before WGMMA.
+            weight_group_size = 0 if self.use_fused_e8m0_scale else self.weight_scale_group_size
+            for gs in (self.input_scale_group_size, weight_group_size):
                 assert gs == 0 or gs >= warp_k
 
     def __call__(self):

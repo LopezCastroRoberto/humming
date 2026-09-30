@@ -140,7 +140,7 @@ def build_sm90_seed_config(problem: TuningProblem) -> dict:
         elif block_shape_m <= 32:
             warp_shape_k = warp_shape_k // 2
 
-    min_warp_shape_n = 32 if layer_config.a_dtype.num_bits == 16 else 16
+    min_warp_shape_n = 32 if layer_config.a_dtype.num_bits == 16 or layer_config.use_packed_k_layout else 16
     # Keep a complete four-warp WGMMA group while fitting output width.
     while layer_config.shape_n % block_shape_n != 0:
         block_shape_n //= 2
@@ -303,6 +303,7 @@ def _w4a8_enabled(
         and layer_config.as_dtype == dtypes.float32
         and layer_config.bs_dtype == dtypes.float8e8m0
         and layer_config.use_fused_e8m0_scale
+        and not layer_config.use_packed_k_layout
         and layer_config.input_scale_group_size == 128
         and layer_config.weight_scale_group_size == 32
         and layer_config.num_experts > 0

@@ -313,7 +313,6 @@ class LayerConfig(BaseHummingConfig):
             assert self.mma_type == MmaType.WGMMA, "use_packed_k_layout requires wgmma"
             assert self.a_dtype.num_bits == 8, "use_packed_k_layout requires 8-bit activation"
             assert self.b_dtype.num_bits % 2 == 0, "use_packed_k_layout requires even-bit weight"
-            assert not self.use_fused_e8m0_scale, "packed_k_layout is incompatible with fused-e8m0"
 
         if type(self) is LayerConfig:
             self._config_str = self.to_str()

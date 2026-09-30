@@ -88,9 +88,10 @@ def _is_legal_geometry(
         swizzle_bytes = 128 if layer_config.a_dtype.num_bits * block_shape[2] >= 1024 else 64
         if warp_shape[2] > swizzle_bytes * 8 // layer_config.a_dtype.num_bits:
             return False
+    weight_group_size = 0 if layer_config.use_fused_e8m0_scale else layer_config.weight_scale_group_size
     is_warp_k_gt_groupsize = any(
         group_size and group_size < warp_shape[2]
-        for group_size in (layer_config.input_scale_group_size, layer_config.weight_scale_group_size)
+        for group_size in (layer_config.input_scale_group_size, weight_group_size)
     )
     if layer_config.use_packed_k_layout and is_warp_k_gt_groupsize:
         return False

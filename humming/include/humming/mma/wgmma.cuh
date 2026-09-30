@@ -47,7 +47,7 @@ public:
 
   Ctx &ctx;
   ArithClass &arith;
-  uint32_t regs_qb[2][ElementB::kBits * (16 / ElementA::kBits)];
+  uint32_t regs_qb[2][kUsePackedKLayout ? kNumKSlabs * ElementB::kBits / 2 : ElementB::kBits * (16 / ElementA::kBits)];
   typename MmaOpClass::BRegisters regs_b[2][kUsePackedKLayout ? 1 : (WarpShape::N * 4 / MmaShape::N / kPackedKFactor)][kRegsBKDim];
   alignas(16) CRegistersArrayType regs_c[2];
   uint32_t smem_offset = 0;
@@ -88,7 +88,8 @@ public:
 
     if constexpr (kUseFusedE8m0Scale) {
       uint32_t *regs_b_ptr = reinterpret_cast<uint32_t *>(regs_b[buffer_id]);
-      fused_dequant_for_mxfp4<ElementA, WarpShape::N / 16, true>(regs_qb[buffer_id], regs_b_ptr, arith.bs[buffer_id]);
+      constexpr uint32_t kTransformIters = kUsePackedKLayout ? kNumKSlabs : WarpShape::N / 16;
+      fused_dequant_for_mxfp4<ElementA, kTransformIters, true>(regs_qb[buffer_id], regs_b_ptr, arith.bs[buffer_id]);
     } else {
       if constexpr (ElementB::kBits == 1 && kNumWarpShapeNSplits == 2) {
         regs_qb[buffer_id][0] = regs_qb[buffer_id][0] >> (ctx.warp_id() % 2 * (ElementA::kBits / 2));

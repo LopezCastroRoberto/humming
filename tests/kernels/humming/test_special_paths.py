@@ -2,6 +2,7 @@ import pytest
 import torch
 from torch._dynamo.testing import CompileCounterWithBackend
 
+import humming.testing.runner as runner_module
 from humming import dtypes
 from humming.config import ComputeConfig, GemmType, LayerConfig, MmaType, WeightScale2Type
 from humming.forward import humming_forward
@@ -167,6 +168,30 @@ SPECIAL_WEIGHT_CASES = (
             mma_type=MmaType.WGMMA,
         ),
     ),
+    *(
+        _kernel_case(
+            required_features=("use_packed_k_layout", "use_fused_e8m0_scale"),
+            name=f"packed-k-fused-e8m0-{a_dtype}-gs{group_size}-as{input_group_size}-{gemm_type.value}",
+            layer_config=_layer_config(
+                a_dtype=a_dtype,
+                b_dtype=dtypes.float4e2m1,
+                bs_dtype=dtypes.float8e8m0,
+                input_scale_group_size=input_group_size,
+                weight_scale_group_size=group_size,
+                weight_scale_2_type=WeightScale2Type.CHANNEL
+                if input_group_size == 0
+                else WeightScale2Type.TENSOR,
+                num_experts=0 if gemm_type == GemmType.DENSE else 8,
+                mma_type=MmaType.WGMMA,
+                use_packed_k_layout=True,
+            ),
+            gemm_type=gemm_type,
+        )
+        for a_dtype in (dtypes.float8e4m3, dtypes.int8)
+        for group_size in (32, 64, 128)
+        for input_group_size in (0, 128)
+        for gemm_type in (GemmType.DENSE, GemmType.GROUPED_CONTIGUOUS)
+    ),
 )
 
 
@@ -251,3 +276,45 @@ def test_special_weight_path_coverage():
     odd_bit_fallback = next(case.layer_config for _, case in SPECIAL_WEIGHT_CASES if "odd-bit" in case.name)
     assert odd_bit_fallback.b_dtype.num_bits % 2 == 1
     assert odd_bit_fallback.use_packed_k_layout is False
+
+
+@pytest.mark.parametrize("warp_k,warp_n,k_warps", [(64, 32, 1), (128, 32, 1), (64, 64, 2), (128, 64, 2)])
+@pytest.mark.parametrize("use_warp_spec", [False, True])
+@pytest.mark.parametrize("a_dtype", [dtypes.float8e4m3, dtypes.int8])
+def test_packed_k_fused_scale_geometry(monkeypatch, warp_k, warp_n, k_warps, use_warp_spec, a_dtype):
+    skip_if_unsupported(a_dtype=a_dtype, mma_type="wgmma")
+    config = _layer_config(
+        a_dtype=a_dtype,
+        b_dtype=dtypes.float4e2m1,
+        bs_dtype=dtypes.float8e8m0,
+        input_scale_group_size=128,
+        weight_scale_group_size=32,
+        num_experts=33,
+        mma_type=MmaType.WGMMA,
+        use_packed_k_layout=True,
+    )
+    case = KernelTestCase(
+        name="packed-k-fused-scale-geometry",
+        layer_config=config,
+        compute_config=ComputeConfig(gemm_type=GemmType.GROUPED_CONTIGUOUS, use_m_major_input_scale=True),
+        top_k=2,
+        seed=2026,
+    )
+    tuning = dict(
+        block_shape=(64, warp_n * 4, warp_k * k_warps),
+        warp_shape=(64, warp_n, warp_k),
+        num_stages=3,
+        use_warp_spec=use_warp_spec,
+        use_stream_k=False,
+        use_flat_grouped_raster=use_warp_spec,
+        raster_group_m=8 if use_warp_spec else 1,
+        multi_cast_size_a=1,
+        multi_cast_size_b=1,
+    )
+    monkeypatch.setattr(
+        runner_module,
+        "generate_heuristics_configs",
+        lambda layer, compute, shape_ms: [dict(tuning) for _ in shape_ms],
+    )
+    results = KernelTestRunner(case).run(shape_ms=[17, 257])
+    assert_kernel_test_shape_coverage(results, [17, 257])
