@@ -198,12 +198,20 @@ __global__ __launch_bounds__(TuningConfig::kNumThreads, TuningConfig::kNumCtasPe
         debug_kernel_timeout_check(debug_start_clock);
         PRAGMA_UNROLL
         for (uint32_t warp_iter_id = 0; warp_iter_id < Ctx::kWarpIters; warp_iter_id++) {
+          // Packed N16 keeps B live until wait_and_promote, but can prefetch
+          // the next quantized weights while the current WGMMA is in flight.
+          if constexpr (Ctx::kUsePackedLateAS)
+            mma.issue(stage_id, warp_iter_id);
+          else if constexpr (Ctx::kWarpIters == 1)
+            mma.run(stage_id, warp_iter_id);
           if (warp_iter_id == Ctx::kWarpIters - 1 && slice_iter + 1 < num_slice_iters) {
             consumer.wait_stage((stage_id + 1) % kNumStages);
           }
-          if constexpr (Ctx::kWarpIters == 1) mma.run(stage_id, warp_iter_id);
           s2r_pipe.load_stage_iter(stage_id, warp_iter_id + 1);
-          if constexpr (Ctx::kWarpIters > 1) mma.run(stage_id, warp_iter_id);
+          if constexpr (Ctx::kUsePackedLateAS)
+            mma.wait_and_promote(stage_id, warp_iter_id);
+          else if constexpr (Ctx::kWarpIters > 1)
+            mma.run(stage_id, warp_iter_id);
           mma.transform_b(
               ((warp_iter_id + 1) % Ctx::kWarpIters) % 2,
               (warp_iter_id + 1) % Ctx::kWarpIters);

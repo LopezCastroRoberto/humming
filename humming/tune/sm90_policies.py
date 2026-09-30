@@ -275,18 +275,18 @@ def select_grouped_scale(
 
 # Packed MXFP4 x FP8(GS128) grouped-prefill Hopper schedule. The variable-M
 # tile policy was measured on H200; other SM90 devices use M128.
-_W4A8_MAX_TILE_M = 128
-_W4A8_MAX_MODELED_EXPERT_ROWS = 6 * _W4A8_MAX_TILE_M
+_W4A8_DEFAULT_TILE_M = 128
+_W4A8_MAX_MODELED_EXPERT_ROWS = 512
 
 
 def _w4a8_tile_m_for_expert_rows(rows_per_expert: int) -> int:
-    if rows_per_expert > _W4A8_MAX_MODELED_EXPERT_ROWS:
-        return _W4A8_MAX_TILE_M
-    num_tiles = max(1, math.ceil(rows_per_expert / _W4A8_MAX_TILE_M))
+    if rows_per_expert >= _W4A8_MAX_MODELED_EXPERT_ROWS:
+        return 176
+    num_tiles = max(1, math.ceil(rows_per_expert / _W4A8_DEFAULT_TILE_M))
     target_rows = rows_per_expert + math.sqrt(rows_per_expert)
     alignment = 32 if num_tiles == 1 else 16
     block_m = math.ceil(target_rows / num_tiles / alignment) * alignment
-    return min(_W4A8_MAX_TILE_M, max(64, block_m))
+    return min(_W4A8_DEFAULT_TILE_M, max(64, block_m))
 
 
 _W4A8_EXPERT_ROW_BOUNDARIES = tuple(
@@ -332,7 +332,7 @@ def _set_w4a8_config(config: dict, block_m: int) -> None:
     config.update(
         block_shape=(block_m, 128, 128),
         warp_shape=(block_m, 16, 128),
-        num_stages=5,
+        num_stages=4 if block_m == 176 else 5,
         use_warp_spec=True,
         use_stream_k=False,
         use_packed_k_layout=True,
@@ -351,7 +351,7 @@ def apply_w4a8_config(
 ) -> None:
     if not _w4a8_enabled(layer_config, use_m_major_input_scale, gemm_type):
         return
-    block_m = _w4a8_block_m(layer_config, shape_m) if _w4a8_uses_variable_m_tiles() else _W4A8_MAX_TILE_M
+    block_m = _w4a8_block_m(layer_config, shape_m) if _w4a8_uses_variable_m_tiles() else _W4A8_DEFAULT_TILE_M
     _set_w4a8_config(config, block_m)
 
 
@@ -366,7 +366,7 @@ def specialize_w4a8_ranges(
 
     if not _w4a8_uses_variable_m_tiles():
         for _, _, config in configs:
-            _set_w4a8_config(config, _W4A8_MAX_TILE_M)
+            _set_w4a8_config(config, _W4A8_DEFAULT_TILE_M)
         return configs
 
     boundaries = tuple(rows * layer_config.num_experts for rows in _W4A8_EXPERT_ROW_BOUNDARIES)

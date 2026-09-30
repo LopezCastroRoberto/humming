@@ -385,6 +385,9 @@ def test_grouped_w4a8_ranges_match_direct_selection(monkeypatch, device_name, nu
         assert lower == previous_upper and lower < upper
         assert config["use_packed_k_layout"]
         assert config["warp_shape"][1:] == (16, 128)
+        if device_name == "H200" and lower >= num_experts * 512:
+            assert config["warp_shape"][0] == 176
+            assert config["num_stages"] == 4
         for shape_m in (lower + 1, min(upper, lower + num_experts * 2048)):
             assert select(layer, shape_m=shape_m, **kwargs) == config
         previous_upper = upper
