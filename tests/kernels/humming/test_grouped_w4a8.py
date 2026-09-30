@@ -128,7 +128,6 @@ def test_grouped_mxfp4_fp8_m_major(shape_m, num_experts, top_k):
     )
     results = KernelTestRunner(case).run(shape_ms=[shape_m])
     assert len(results) == 1
-    assert results[0].tuning_config.use_shared_as_promotion
     block_m, block_n, block_k = results[0].tuning_config.block_shape
     assert 64 <= block_m <= 176 and block_m % 16 == 0
     assert (block_n, block_k) == (128, 128)

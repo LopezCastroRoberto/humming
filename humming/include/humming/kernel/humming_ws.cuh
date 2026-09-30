@@ -72,7 +72,6 @@ __global__ __launch_bounds__(TuningConfig::kNumThreads, TuningConfig::kNumCtasPe
   using S2RMemoryPipeline = S2RMemoryPipeline<Ctx, MMA, Epilogue>;
   constexpr uint32_t kAccumulatorRegistersPerThread = sizeof(typename MMA::CRegistersArrayType) / sizeof(uint32_t) * (MMA::final_regs_c_index() + 1);
   constexpr bool kUseRegisterReallocation = TuningConfig::kNumMathThreads > 128 || ProblemShape::K > BlockShape::K * 16;
-  static_assert(!TuningConfig::kUseSharedASPromotion || Ctx::kUseWgmma);
   static_assert(Ctx::kWarpIters >= 2, "warp-specialized mainloop requires at least two warp iterations");
 
   extern __shared__ int4 shared_memory[];
@@ -182,8 +181,6 @@ __global__ __launch_bounds__(TuningConfig::kNumThreads, TuningConfig::kNumCtasPe
 
     while (scheduler.get_next_block()) {
       debug_kernel_timeout_check(debug_start_clock);
-      if constexpr (TuningConfig::kUseSharedASPromotion)
-        mma.set_m_scale_offset(scheduler.m_offset);
       mma.zero_accum();
 
       uint32_t &slice_iters = scheduler.slice_iters;
@@ -206,17 +203,10 @@ __global__ __launch_bounds__(TuningConfig::kNumThreads, TuningConfig::kNumCtasPe
             consumer.wait_stage((stage_id + 1) % kNumStages);
           }
           s2r_pipe.load_stage_iter(stage_id, warp_iter_id + 1);
-          if constexpr (TuningConfig::kUseSharedASPromotion) {
-            // Convert the next B fragment while this WGMMA is in flight.
-            mma.issue(stage_id, warp_iter_id);
-          } else {
-            mma.run(stage_id, warp_iter_id);
-          }
+          mma.run(stage_id, warp_iter_id);
           mma.transform_b(
               (warp_iter_id + 1) % 2,
               (warp_iter_id + 1) % Ctx::kWarpIters);
-          if constexpr (TuningConfig::kUseSharedASPromotion)
-            mma.wait_and_promote(stage_id, warp_iter_id);
           if (warp_iter_id == Ctx::kWarpIters - 1) consumer.arrive(stage_id);
         }
       };

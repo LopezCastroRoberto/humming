@@ -491,17 +491,6 @@ class HummingKernel(KernelRuntime, LayerConfig, ComputeConfig, TuningConfig):
         if self.gemm_type is None and self.num_experts == 0:
             self.gemm_type = GemmType.DENSE
         assert self.gemm_type is not None, "gemm_type must be specify for MoE GEMM"
-        if self.use_shared_as_promotion:
-            assert self.use_warp_spec and self.mma_type == MmaType.WGMMA
-            assert self.use_m_major_input_scale and not self.use_packed_k_layout
-            assert self.use_fused_e8m0_scale
-            assert self.a_dtype == dtypes.float8e4m3
-            assert self.b_dtype == dtypes.float4e2m1
-            assert self.as_dtype == dtypes.float32
-            assert self.bs_dtype == dtypes.float8e8m0
-            assert self.input_scale_group_size == 128
-            assert self.weight_scale_group_size == 32
-
         if self.is_tensor_input_scale:
             self.use_tma_as = False
             self.use_m_major_input_scale = False
