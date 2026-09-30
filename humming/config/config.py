@@ -13,6 +13,7 @@ from humming.config.enum import (
     InputQuantizationMode,
     MmaType,
     ProcessInputLayoutType,
+    SmemReuseMode,
     WeightScale2Type,
     WeightScaleType,
 )
@@ -437,6 +438,8 @@ class TuningConfig(BaseHummingConfig):
 
     num_stages: int = 2
     num_ctas_per_sm: int = 1
+    umma_cta_group_size: int = 1
+    umma_output_chunk_rows: int = 0
 
     use_warp_spec: bool | None = None
     use_mbarrier: bool | None = None
@@ -453,7 +456,7 @@ class TuningConfig(BaseHummingConfig):
     use_tma_bzp: bool | None = None
     use_tma_bias: bool | None = None
 
-    reduce_overlap_last_stage_only: bool = False
+    smem_reuse_mode: SmemReuseMode | str | None = None
 
     num_write_splits: int = 1
     multi_cast_size_a: int = 1
@@ -470,6 +473,7 @@ class TuningConfig(BaseHummingConfig):
         "num_threads",
         "num_math_threads",
         "num_load_threads",
+        "smem_reuse_mode_id",
     )
 
     _name_map = {
@@ -482,7 +486,17 @@ class TuningConfig(BaseHummingConfig):
         "use_shared_as_promotion": "kUseSharedASPromotion",
     }
 
+    @property
+    def smem_reuse_mode_id(self):
+        return list(SmemReuseMode).index(self.smem_reuse_mode)
+
     def __post_init__(self):
+        if self.smem_reuse_mode is None:
+            mma_type = getattr(self, "mma_type", None)
+            self.smem_reuse_mode = SmemReuseMode.ALL_STAGES
+            if mma_type == MmaType.UMMA:
+                self.smem_reuse_mode = SmemReuseMode.NONE
+        self.smem_reuse_mode = SmemReuseMode(self.smem_reuse_mode)
         assert self.block_shape[0] <= 256
         if self.use_warp_spec is None:
             self.use_warp_spec = False

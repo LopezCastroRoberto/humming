@@ -20,10 +20,12 @@ private:
   static constexpr uint32_t kNumThreads = Ctx::kNumThreads;
   static constexpr uint32_t kNumMathThreads = Ctx::kNumMathThreads;
   static constexpr uint32_t kNumLoadThreads = Ctx::kNumLoadThreads;
-  static constexpr uint32_t kLoadThreadOffset = kNumThreads - kNumLoadThreads;
-  static constexpr uint32_t kMultiCastSizeA = Ctx::kMultiCastSizeA;
-  static constexpr uint32_t kMultiCastSizeB = Ctx::kMultiCastSizeB;
-  static constexpr uint32_t kMultiCastSize = kMultiCastSizeA * kMultiCastSizeB;
+  static constexpr uint32_t kLoadThreadOffset = Ctx::kLoadThreadOffset;
+  // Multicast shares A; cooperative UMMA loads distinct halves of A.
+  // Both group adjacent output tiles along N.
+  static constexpr uint32_t kNumCtasDimN = Ctx::kMultiCastSizeA * Ctx::kUmmaCtaGroupSize;
+  static constexpr uint32_t kNumCtasDimM = Ctx::kMultiCastSizeB;
+  static constexpr uint32_t kCtaGroupSize = kNumCtasDimN * kNumCtasDimM;
 
   static constexpr uint32_t kInputScaleGroupSize = Ctx::kInputScaleGroupSize > 0 ? Ctx::kInputScaleGroupSize : 1;
   static constexpr uint32_t kWeightScaleGroupSize = Ctx::kWeightScaleGroupSize > 0 ? Ctx::kWeightScaleGroupSize : 1;
@@ -32,7 +34,7 @@ private:
   static constexpr bool kUseMxmma = Ctx::kUseMxmma;
   static constexpr uint32_t kAsBlocksPerWord = kUseMxmma ? MAX(1u, 4 * kInputScaleGroupSize / BlockShape::K) : 1;
 
-  static constexpr uint32_t N_BLOCKS = ProblemShape::N / BlockShape::N / kMultiCastSizeA;
+  static constexpr uint32_t N_BLOCKS = ProblemShape::N / BlockShape::N / kNumCtasDimN;
   static constexpr uint32_t K_BLOCKS = ProblemShape::K / BlockShape::K;
 
   static constexpr uint32_t kRasterGroupM = Ctx::kRasterGroupM;
@@ -67,7 +69,7 @@ public:
   uint32_t locks_offset = 0;
 
   // for tma multi-cast
-  uint32_t cluster_rank = blockIdx.x % kMultiCastSize;
+  uint32_t cluster_rank = blockIdx.x % kCtaGroupSize;
 
   // for moe gemm (indexed gemm or grouped gemm)
   uint32_t old_expert_id = (1 << 30);
@@ -85,7 +87,7 @@ public:
   Scheduler(Ctx &ctx) : ctx(ctx) {
     static_assert(!kUseFlatGroupedRaster ||
                   (kIsGroupedContiguousGemm && !kUseStreamK &&
-                   kMultiCastSizeA == 1 && kMultiCastSizeB == 1 &&
+                   kNumCtasDimN == 1 && kNumCtasDimM == 1 &&
                    kRasterGroupM == 1));
 
     if constexpr (kIsGroupedGemm && Ctx::kUseTmaC) {
@@ -102,7 +104,7 @@ public:
     }
     mn_blocks = m_blocks * N_BLOCKS;
     mnk_blocks = mn_blocks * K_BLOCKS;
-    uint32_t kNumCtaGroups = gridDim.x / kMultiCastSize;
+    uint32_t kNumCtaGroups = gridDim.x / kCtaGroupSize;
 
     if constexpr (kUseStreamK) {
       uint32_t streamk_mn_blocks = mn_blocks;
@@ -117,6 +119,13 @@ public:
 
       streamk_mnk_total_iters = CEIL_DIV(streamk_mnk_blocks, kNumCtaGroups);
 
+      if constexpr (Ctx::kUseUmma) {
+        using ElementC = typename Ctx::ElementC;
+        constexpr uint32_t kMaxSlices = 1u << (ElementC::kMantissaBits / 2);
+        constexpr uint32_t kMinSliceIters = CEIL_DIV(K_BLOCKS - 1, kMaxSlices - 1);
+        streamk_mnk_total_iters = MAX(streamk_mnk_total_iters, kMinSliceIters);
+      }
+
       constexpr int32_t blocks_per_group = MAX(kMaxGroupSize / BlockShape::K, kAsBlocksPerWord);
       constexpr int32_t bpg = blocks_per_group > 1 ? blocks_per_group : 1;
       constexpr int32_t align_iters = bpg / ct_gcd(bpg, (int32_t)kNumStages) * (int32_t)kNumStages;
@@ -124,7 +133,7 @@ public:
         streamk_mnk_total_iters = align_iters * CEIL_DIV(streamk_mnk_total_iters, align_iters);
       };
 
-      streamk_mnk_next_index = kNumCtaGroups * dp_mn_iters * K_BLOCKS + streamk_mnk_total_iters * (blockIdx.x / kMultiCastSize);
+      streamk_mnk_next_index = kNumCtaGroups * dp_mn_iters * K_BLOCKS + streamk_mnk_total_iters * (blockIdx.x / kCtaGroupSize);
 
       if (streamk_mnk_next_index >= mnk_blocks) {
         streamk_mnk_iters = 0;
@@ -133,23 +142,23 @@ public:
         if (streamk_mnk_iters > streamk_mnk_total_iters) streamk_mnk_iters = streamk_mnk_total_iters;
       };
     } else {
-      dp_mn_next_index = blockIdx.x / kMultiCastSize;
+      dp_mn_next_index = blockIdx.x / kCtaGroupSize;
       dp_mn_iters = dp_mn_next_index < mn_blocks;
     }
 
     dp_mn_total_iters = dp_mn_iters;
     if constexpr (kUseStreamK) {
-      if (dp_mn_iters) dp_mn_next_index = blockIdx.x / kMultiCastSize;
+      if (dp_mn_iters) dp_mn_next_index = blockIdx.x / kCtaGroupSize;
     }
   };
 
   CUDA_INLINE
   void calc_m_blocks() {
     if constexpr (kIsDenseGemm) {
-      m_blocks = CEIL_DIV(ctx.params.shape_m, BlockShape::M * kMultiCastSizeB);
+      m_blocks = CEIL_DIV(ctx.params.shape_m, BlockShape::M * kNumCtasDimM);
     } else if constexpr (kIsIndexedGemm) {
       uint32_t padded_shape_m = ctx.params.num_tokens_padded_ptr[0];
-      m_blocks = CEIL_DIV(padded_shape_m, BlockShape::M * kMultiCastSizeB);
+      m_blocks = CEIL_DIV(padded_shape_m, BlockShape::M * kNumCtasDimM);
     } else if constexpr (kIsGroupedGemm) {
       auto &expert_layout = ctx.params.expert_layout_ptr;
       if constexpr (kIsGroupedContiguousGemm) {
@@ -197,7 +206,7 @@ public:
             ctx.smem.total_m_blocks[0] = carry;
           }
         }
-      } else if (ctx.warp_id() == 0) {
+      } else if (threadIdx.x < 32) {
         uint32_t tmp_m_blocks = 0;
         PRAGMA_UNROLL
         for (uint32_t i = 0; i < CEIL_DIV(kNumExperts, 32); i++) {
@@ -205,8 +214,7 @@ public:
           if (index < kNumExperts) {
             uint32_t expert_tokens;
             if constexpr (kIsGroupedContiguousGemm) {
-              uint32_t next_offset =
-                  index + 1 < kNumExperts ? ctx.smem.expert_offset[index + 1] : ctx.params.shape_m;
+              uint32_t next_offset = ctx.smem.expert_offset[index + 1];
               expert_tokens = next_offset - ctx.smem.expert_offset[index];
               ctx.smem.expert_tokens[index] = expert_tokens;
             } else {
@@ -270,13 +278,13 @@ public:
 
       map_mn_block(dp_mn_next_index, m_block_id, n_block_id);
 
-      if constexpr (kMultiCastSizeB > 1) {
-        m_block_id = m_block_id * kMultiCastSizeB + cluster_rank;
-      } else if constexpr (kMultiCastSizeA > 1) {
-        n_block_id = n_block_id * kMultiCastSizeA + cluster_rank;
+      if constexpr (kNumCtasDimM > 1) {
+        m_block_id = m_block_id * kNumCtasDimM + cluster_rank;
+      } else if constexpr (kNumCtasDimN > 1) {
+        n_block_id = n_block_id * kNumCtasDimN + cluster_rank;
       }
       k_block_id = 0;
-      dp_mn_next_index += gridDim.x / kMultiCastSize;
+      dp_mn_next_index += gridDim.x / kCtaGroupSize;
       if constexpr (kUseStreamK) dp_mn_iters--;
       else dp_mn_iters = dp_mn_next_index < mn_blocks;
       has_next_block = true;
@@ -300,10 +308,10 @@ public:
     uint32_t streamk_mn_index = streamk_mnk_next_index / K_BLOCKS;
 
     map_mn_block(streamk_mn_index, m_block_id, n_block_id);
-    if constexpr (kMultiCastSizeB > 1) {
-      m_block_id = m_block_id * kMultiCastSizeB + cluster_rank;
-    } else if constexpr (kMultiCastSizeA > 1) {
-      n_block_id = n_block_id * kMultiCastSizeA + cluster_rank;
+    if constexpr (kNumCtasDimM > 1) {
+      m_block_id = m_block_id * kNumCtasDimM + cluster_rank;
+    } else if constexpr (kNumCtasDimN > 1) {
+      n_block_id = n_block_id * kNumCtasDimN + cluster_rank;
     }
     k_block_id = streamk_mnk_next_index - streamk_mn_index * K_BLOCKS;
 
@@ -328,8 +336,8 @@ public:
 
     slice_id = slice_count - 1 - slice_id;
 
-    locks_offset = streamk_mn_index - dp_mn_total_iters * gridDim.x / kMultiCastSize;
-    locks_offset = locks_offset * kMultiCastSize + cluster_rank;
+    locks_offset = streamk_mn_index - dp_mn_total_iters * gridDim.x / kCtaGroupSize;
+    locks_offset = locks_offset * kCtaGroupSize + cluster_rank;
 
     return true;
   };
@@ -361,10 +369,28 @@ public:
     m_block_in_expert += delta_m_block_id;
 
     while (m_block_in_expert >= current_expert_m_blocks) {
-      m_block_in_expert -= current_expert_m_blocks;
-      expert_id++;
-      current_expert_num_tokens = ctx.smem.expert_tokens[expert_id];
-      current_expert_m_blocks = CEIL_DIV(current_expert_num_tokens, BlockShape::M);
+      uint32_t lane = threadIdx.x % 32;
+      uint32_t index = expert_id + lane;
+      uint32_t tokens = index < kNumExperts ? ctx.smem.expert_tokens[index] : 0;
+      uint32_t blocks = CEIL_DIV(tokens, BlockShape::M);
+      uint32_t prefix = blocks;
+      PRAGMA_UNROLL
+      for (uint32_t offset = 1; offset < 32; offset *= 2) {
+        uint32_t preceding = __shfl_up_sync(0xffffffff, prefix, offset);
+        if (lane >= offset) prefix += preceding;
+      }
+      uint32_t matches = __ballot_sync(0xffffffff, m_block_in_expert < prefix);
+      if (matches) {
+        uint32_t selected_lane = __ffs(matches) - 1;
+        m_block_in_expert -= __shfl_sync(0xffffffff, prefix - blocks, selected_lane);
+        current_expert_num_tokens = __shfl_sync(0xffffffff, tokens, selected_lane);
+        current_expert_m_blocks = __shfl_sync(0xffffffff, blocks, selected_lane);
+        expert_id += selected_lane;
+        break;
+      }
+      m_block_in_expert -= __shfl_sync(0xffffffff, prefix, 31);
+      expert_id += 32;
+      current_expert_m_blocks = 0;
     }
 
     old_m_block_id = m_block_id;
@@ -384,11 +410,13 @@ public:
   CUDA_INLINE
   void fetch_moe_index_block() {
     expert_id = ctx.params.expert_ids_ptr[m_block_id];
-    if (kUseWarpSpec && ctx.is_math_thread()) return;
+    if (kUseWarpSpec && !ctx.is_load_thread()) return;
 
     const uint32_t *gmem_ptr = ctx.params.sorted_ids_ptr + m_block_id * BlockShape::M;
     const int4 *gmem_ptr_load = reinterpret_cast<const int4 *>(gmem_ptr);
-    int4 *smem_ptr_load = reinterpret_cast<int4 *>(ctx.smem.wr_row_index);
+    uint32_t *wr_row_index = ctx.get_wr_row_index();
+    uint32_t *rd_row_index = ctx.get_rd_row_index();
+    int4 *smem_ptr_load = reinterpret_cast<int4 *>(wr_row_index);
 
     legacy_load_1d<kUseCpAsync, BlockShape::M / 4, kNumLoadThreads, kLoadThreadOffset>(gmem_ptr_load, smem_ptr_load);
     if constexpr (kUseCpAsync) cp_async_commit_group();
@@ -397,13 +425,13 @@ public:
     ctx.sync_load_threads();
 
     uint32_t thread_id = threadIdx.x;
-    if constexpr (kUseWarpSpec) thread_id = thread_id - kNumMathThreads;
+    if constexpr (kUseWarpSpec) thread_id = ctx.load_thread_id();
     PRAGMA_UNROLL
     for (uint32_t i = 0; i < CEIL_DIV(BlockShape::M, kNumLoadThreads); i++) {
       uint32_t index = kNumLoadThreads * i + thread_id;
       if (index < BlockShape::M) {
-        uint32_t idx = ctx.smem.wr_row_index[index];
-        ctx.smem.rd_row_index[index] = idx / ctx.params.top_k;
+        uint32_t idx = wr_row_index[index];
+        rd_row_index[index] = idx / ctx.params.top_k;
       };
     }
 
@@ -413,10 +441,10 @@ public:
   CUDA_INLINE
   void update_tensor_map_c() {
     if constexpr (kIsGroupedGemm && Ctx::kUseTmaC) {
-      if (threadIdx.x < 32) {
+      if (ctx.math_thread_id() < 32 && ctx.is_math_thread()) {
         tma_wait_store_group<0>();
         __syncwarp();
-        if (threadIdx.x == 0) {
+        if (ctx.math_thread_id() == 0) {
           tensor_map_replace_global_dim<1>(ctx.smem.tensor_map_buffer, current_shape_m);
           ctx.params.tensor_map_buffer[blockIdx.x] = ctx.smem.tensor_map_buffer[0];
           tensor_map_release_cta();

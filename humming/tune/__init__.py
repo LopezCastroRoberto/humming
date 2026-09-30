@@ -5,8 +5,8 @@ import torch
 from humming.config import GemmType, LayerConfig
 from humming.device import DeviceInfo, get_device_index
 from humming.tune.base import DeviceHeuristics
-from humming.tune.raster import raster_group_m_for_config
 from humming.tune.ppu_sm80 import PPUSm80Heuristics
+from humming.tune.raster import raster_group_m_for_config
 from humming.tune.sm8x import (
     Sm80Heuristics,
     Sm86Heuristics,
@@ -110,9 +110,13 @@ def _get_heuristics_config(
     use_f16_accum: bool = False,
     use_batch_invariant: bool = False,
     use_m_major_input_scale: bool = False,
-    gemm_type: str | GemmType = "dense",
+    gemm_type: str | GemmType | None = "dense",
     device_index: int = 0,
 ):
+    if gemm_type is None:
+        if layer_config.num_experts:
+            raise ValueError("gemm_type must be specified for MoE GEMM")
+        gemm_type = GemmType.DENSE
     if isinstance(gemm_type, str):
         gemm_type = GemmType(gemm_type)
 
@@ -146,7 +150,7 @@ def get_heuristics_config(
     use_f16_accum: bool = False,
     use_batch_invariant: bool = False,
     use_m_major_input_scale: bool = False,
-    gemm_type: str | GemmType = "dense",
+    gemm_type: str | GemmType | None = "dense",
     device: int | torch.device | None = None,
 ):
     device_index = get_device_index(device)

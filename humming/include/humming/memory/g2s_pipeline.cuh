@@ -53,7 +53,6 @@ private:
       kIsChannelWeightScale2 || kHasBias;
 
   static constexpr uint32_t kNumStages = Ctx::kNumStages;
-  static constexpr bool kUseTwoStageReduceBarrier = SharedStorage::kUseTwoStageReduceBarrier;
 
   template <bool kIsFirst = false>
   static constexpr uint2 get_stage_load_bytes() {
@@ -176,6 +175,7 @@ public:
     }
   }
 
+  template <uint32_t kStageConsumers = kNumMathThreads, uint32_t kChannelConsumers = kNumMathThreads>
   CUDA_INLINE static void init_mbarrier(Ctx &ctx) {
     if constexpr (kUseMBarrier) {
       uint32_t thread_id = ctx.load_thread_id();
@@ -200,7 +200,8 @@ public:
       uint32_t factor = (kMultiCastSize > 1 && cluster_rank == 0 && thread_id < SharedStorage::kNumMathMbarriers) ? kMultiCastSize : 1;
       if constexpr (Ctx::kUseWarpSpec) {
         if (thread_id < SharedStorage::kNumMathMbarriers) {
-          __mbarrier_init(&smem.math_mbar[thread_id], kNumMathThreads * factor);
+          uint32_t consumers = thread_id < kNumStages ? kStageConsumers : kChannelConsumers;
+          __mbarrier_init(&smem.math_mbar[thread_id], consumers * factor);
         }
       }
     }
@@ -244,6 +245,36 @@ public:
       commit_cp_async_load<kHasStageCpAsyncMBarrier>(mbar_index, pred);
     }
     if (pred) expect_tma_load<kHasTmaMBarrier>(mbar_ptr, load_bytes.x);
+  }
+
+  template <bool kShouldAdvance = true>
+  CUDA_INLINE void load_weight_stage(uint32_t stage_id) {
+    auto &stage = ctx.smem.stages[stage_id];
+    auto *weight_mbar = &ctx.smem.umma_weight_ready[stage_id];
+    loader_b.template load<kShouldAdvance>(stage.b, weight_mbar);
+    uint32_t bytes = SharedStorage::kStageBytesB;
+    if constexpr (kIsGroupWeightScale || kIsBlockWeightScale) {
+      loader_bs.template load<kShouldAdvance>(stage.bs, weight_mbar);
+      bytes += SharedStorage::kStageBytesBS;
+    }
+    if constexpr (kHasZeroPoint && !kIsChannelWeightScale) {
+      loader_bzp.template load<kShouldAdvance>(stage.bzp, weight_mbar);
+      bytes += SharedStorage::kStageBytesBZP;
+    }
+    if (ctx.load_thread_id() == 0) tma_expect_tx(weight_mbar, bytes);
+  }
+
+  template <bool kShouldAdvance = true>
+  CUDA_INLINE void load_activation_stage(uint32_t stage_id) {
+    auto &stage = ctx.smem.stages[stage_id];
+    auto *activation_mbar = &ctx.smem.load_mbar[stage_id];
+    loader_a.template load<kShouldAdvance>(stage.a, activation_mbar, stage_id);
+    uint32_t bytes = SharedStorage::kStageBytesA;
+    if constexpr (kIsGroupInputScale) {
+      loader_as.template load<kShouldAdvance>(stage.as, activation_mbar);
+      bytes += SharedStorage::kStageBytesAS;
+    }
+    if (ctx.load_thread_id() == 32) tma_expect_tx(activation_mbar, bytes);
   }
 
   CUDA_INLINE void load_channel() {
@@ -317,15 +348,6 @@ public:
     phases[kNumStages] ^= 1;
   }
 
-  CUDA_INLINE void wait_reduce_epilogue() {
-    if constexpr (kUseTwoStageReduceBarrier) {
-      constexpr uint32_t kBarrierId = kNumStages + 1;
-      mbarrier_wait(&ctx.smem.math_mbar[kBarrierId], phases[kBarrierId], "Humming producer waiting to reuse reduce storage");
-      if constexpr (Ctx::kUseWarpSpec) ctx.sync_load_threads();
-      phases[kBarrierId] ^= 1;
-    }
-  }
-
   CUDA_INLINE void seek(
       uint32_t expert_id, uint32_t m_block_id, uint32_t n_block_id, uint32_t k_block_id,
       uint32_t current_shape_m, uint32_t m_offset) {
@@ -360,9 +382,6 @@ private:
   static constexpr bool kIsChannelWeightScale = Ctx::kIsChannelWeightScale;
   static constexpr bool kIsChannelWeightScale2 = Ctx::kIsChannelWeightScale2;
   static constexpr bool kHasBias = Ctx::kHasBias;
-  static constexpr bool kHasChannelData =
-      kIsChannelInputScale || kIsChannelInputScale2 || kIsChannelWeightScale ||
-      kIsChannelWeightScale2 || kHasBias;
 
   static constexpr uint32_t kNumStages = Ctx::kNumStages;
   static constexpr uint32_t kMultiCastSizeA = Ctx::kMultiCastSizeA;
@@ -370,8 +389,12 @@ private:
   static constexpr uint32_t kMultiCastSize = kMultiCastSizeA * kMultiCastSizeB;
 
 public:
+  static constexpr bool kHasChannelData =
+      kIsChannelInputScale || kIsChannelInputScale2 || kIsChannelWeightScale ||
+      kIsChannelWeightScale2 || kHasBias;
+
   Ctx &ctx;
-  uint32_t phases[Ctx::kNumStages + 2] = {0};
+  uint32_t phases[kNumStages + 2] = {0};
 
   CUDA_INLINE
   ConsumerPipeline(Ctx &ctx) : ctx(ctx) {

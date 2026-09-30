@@ -11,6 +11,7 @@ from humming.testing import (
     assert_kernel_test_shape_coverage,
     skip_if_unsupported,
 )
+from humming.testing.data import generate_random_tensor
 
 SHAPE_N = 1024
 SHAPE_K = 1024
@@ -179,7 +180,11 @@ def test_forward_fullgraph():
         bs_dtype=dtypes.bfloat16,
     )
     runner = KernelTestRunner(
-        KernelTestCase(name="fullgraph", layer_config=config, compute_config=ComputeConfig())
+        KernelTestCase(
+            name="fullgraph",
+            layer_config=config,
+            compute_config=ComputeConfig(gemm_type=GemmType.DENSE),
+        )
     )
     compute_config = runner.compute_config.to_str()
     locks = torch.zeros(1024, device="cuda", dtype=torch.int32)
@@ -197,8 +202,12 @@ def test_forward_fullgraph():
     counter = CompileCounterWithBackend("inductor")
     compiled = torch.compile(forward, backend=counter, fullgraph=True, dynamic=True)
     for shape_m in (17, 257):
-        inputs = torch.randn(shape_m, SHAPE_K, device="cuda", dtype=torch.bfloat16)
+        torch.manual_seed(runner.test_case.seed + shape_m)
+        # Match the numerical range used by KernelTestRunner: Stream-K stores
+        # partial sums in the output dtype, so absolute error scales with inputs.
+        inputs = generate_random_tensor((shape_m, SHAPE_K), dtype=torch.bfloat16, device="cuda")
         expected = (inputs.float() @ runner.weight_ref.T).to(torch.bfloat16)
+        torch.testing.assert_close(forward(inputs), expected, rtol=0.01, atol=0.05)
         torch.testing.assert_close(compiled(inputs), expected, rtol=0.01, atol=0.05)
     assert counter.frame_count == 1
 
