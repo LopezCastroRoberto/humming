@@ -306,13 +306,14 @@ class LayerConfig(BaseHummingConfig):
                 self.mma_type == MmaType.WGMMA
                 and self.a_dtype.num_bits == 8
                 and self.b_dtype.num_bits % 2 == 0
+                and (self.input_scale_group_size == 0 or self.input_scale_group_size >= 128)
                 and (
                     (not self.use_fused_e8m0_scale and self.weight_scale_group_size == 128)
                     or (
                         self.use_fused_e8m0_scale
                         and self.num_experts > 0
                         and self.input_scale_group_size >= 128
-                        and self.shape_n % 128 == 0
+                        and self.shape_n % 64 == 0
                     )
                 )
             )

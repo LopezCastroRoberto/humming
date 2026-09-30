@@ -140,7 +140,7 @@ def build_sm90_seed_config(problem: TuningProblem) -> dict:
         elif block_shape_m <= 32:
             warp_shape_k = warp_shape_k // 2
 
-    min_warp_shape_n = 32 if layer_config.a_dtype.num_bits == 16 or layer_config.use_packed_k_layout else 16
+    min_warp_shape_n = 32 if layer_config.a_dtype.num_bits == 16 else 16
     # Keep a complete four-warp WGMMA group while fitting output width.
     while layer_config.shape_n % block_shape_n != 0:
         block_shape_n //= 2
@@ -153,6 +153,10 @@ def build_sm90_seed_config(problem: TuningProblem) -> dict:
         block_shape_k = block_shape_k // 2
         warp_shape_k = min(warp_shape_k, block_shape_k)
         assert block_shape_k >= warp_shape_k
+
+    if layer_config.use_packed_k_layout:
+        warp_shape_k = 128
+        block_shape_k = max(block_shape_k, warp_shape_k)
 
     if problem.gemm_type == GemmType.INDEXED and layer_config.use_packed_k_layout:
         while block_shape_n // warp_shape_n * (block_shape_k // warp_shape_k) > 8:
@@ -270,8 +274,8 @@ def select_grouped_scale(
 
 
 # Packed MXFP4 x FP8(GS128) grouped-prefill Hopper schedule. The variable-M
-# tile policy was measured on H200; other SM90 devices use M96.
-_W4A8_MAX_TILE_M = 96
+# tile policy was measured on H200; other SM90 devices use M128.
+_W4A8_MAX_TILE_M = 128
 _W4A8_MAX_MODELED_EXPERT_ROWS = 6 * _W4A8_MAX_TILE_M
 
 
@@ -300,6 +304,7 @@ def _w4a8_enabled(
     return (
         gemm_type == GemmType.GROUPED_CONTIGUOUS
         and layer_config.sm_version == 90
+        and layer_config.shape_n % 128 == 0
         and use_m_major_input_scale
         and layer_config.mma_type == MmaType.WGMMA
         and layer_config.a_dtype == dtypes.float8e4m3
@@ -326,8 +331,8 @@ def _w4a8_uses_variable_m_tiles() -> bool:
 def _set_w4a8_config(config: dict, block_m: int) -> None:
     config.update(
         block_shape=(block_m, 128, 128),
-        warp_shape=(block_m, 32, 128),
-        num_stages=4,
+        warp_shape=(block_m, 16, 128),
+        num_stages=5,
         use_warp_spec=True,
         use_stream_k=False,
         use_packed_k_layout=True,

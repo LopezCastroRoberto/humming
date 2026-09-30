@@ -140,6 +140,7 @@ MXFP4_CASES = (
         )
         for experts, shape_n, shape_k in (
             (8, 1024, 1024),
+            (8, 1088, 1024),
             (33, 1024, 1024),
             (128, 1024, 1024),
             (32, 4096, 6144),
@@ -165,7 +166,9 @@ def test_mxfp4(expected_fused, test_case):
     skip_if_unsupported(a_dtype=config.a_dtype, mma_type=config.mma_type.value)
     results = KernelTestRunner(test_case).run()
     if test_case.uses_m_major_input_scale:
-        assert all(result.tuning_values["use_packed_k_layout"] for result in results)
+        assert all(
+            result.tuning_values.get("use_packed_k_layout", config.use_packed_k_layout) for result in results
+        )
     assert_kernel_test_shape_coverage(results)
 
 

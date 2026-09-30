@@ -280,30 +280,44 @@ def test_special_weight_path_coverage():
     assert odd_bit_fallback.use_packed_k_layout is False
 
 
-@pytest.mark.parametrize("warp_k,warp_n,k_warps", [(64, 32, 1), (128, 32, 1), (64, 64, 2), (128, 64, 2)])
+@pytest.mark.parametrize(
+    "a_dtype,use_fused,has_zero_point",
+    [
+        (dtypes.float8e4m3, False, False),
+        (dtypes.int8, False, False),
+        (dtypes.float8e4m3, True, False),
+        (dtypes.int8, True, False),
+        (dtypes.float8e4m3, False, True),
+    ],
+    ids=["fp8", "int8", "fp8-fused", "int8-fused", "fp8-zp"],
+)
+@pytest.mark.parametrize("warp_k,warp_n,k_warps", [(128, 16, 1), (128, 16, 2), (128, 32, 1), (128, 64, 2)])
 @pytest.mark.parametrize("use_warp_spec", [False, True])
-@pytest.mark.parametrize("a_dtype", [dtypes.float8e4m3, dtypes.int8])
-def test_packed_k_fused_scale_geometry(monkeypatch, warp_k, warp_n, k_warps, use_warp_spec, a_dtype):
+def test_packed_k_geometry(
+    monkeypatch, warp_k, warp_n, k_warps, use_warp_spec, a_dtype, use_fused, has_zero_point
+):
     skip_if_unsupported(a_dtype=a_dtype, mma_type="wgmma")
     case = next(
         case
         for _, case in SPECIAL_WEIGHT_CASES
         if case.layer_config.use_packed_k_layout
-        and case.layer_config.use_fused_e8m0_scale
+        and case.layer_config.use_fused_e8m0_scale == use_fused
         and case.layer_config.a_dtype == a_dtype
-        and case.layer_config.input_scale_group_size == 128
-        and case.layer_config.weight_scale_group_size == 32
-        and case.compute_config.gemm_type == GemmType.GROUPED_CONTIGUOUS
+        and case.layer_config.has_zero_point == has_zero_point
+        and (not use_fused or case.layer_config.input_scale_group_size == 128)
+        and case.layer_config.weight_scale_group_size == (32 if use_fused else 128)
     )
     layer = dataclasses.replace(case.layer_config, num_experts=33)
-    compute = dataclasses.replace(case.compute_config, use_m_major_input_scale=True)
+    compute = dataclasses.replace(
+        case.compute_config, gemm_type=GemmType.GROUPED_CONTIGUOUS, use_m_major_input_scale=True
+    )
     case = dataclasses.replace(case, layer_config=layer, compute_config=compute)
     tuning = dict(
         block_shape=(64, warp_n * 4, warp_k * k_warps),
         warp_shape=(64, warp_n, warp_k),
         num_stages=3,
         use_warp_spec=use_warp_spec,
-        use_stream_k=False,
+        use_stream_k=k_warps > 1,
         raster_group_m=8,
         multi_cast_size_a=1,
         multi_cast_size_b=1,

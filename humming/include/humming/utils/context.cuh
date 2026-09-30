@@ -61,6 +61,7 @@ struct KernelContext : LayerConfig_, ComputeConfig_, TuningConfig_ {
   static constexpr bool kUseUmmaSplitLoads = false;
 
   static constexpr bool kUsePackedKLayout = LayerConfig::kUsePackedKLayout;
+  static_assert(!kUsePackedKLayout || WarpShape::K == 128);
   static constexpr uint32_t kPackedKFactor = kUsePackedKLayout ? 2 : 1;
 
   static constexpr uint32_t M_WARPS = BlockShape::M / WarpShape::M;

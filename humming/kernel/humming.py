@@ -522,6 +522,7 @@ class HummingKernel(KernelRuntime, LayerConfig, ComputeConfig, TuningConfig):
 
         if self.use_packed_k_layout:
             warp_k = self.warp_shape[2]
+            assert warp_k == 128, "use_packed_k_layout requires warp_k=128"
             # Fused weight scales are applied to each B slab before WGMMA.
             weight_group_size = 0 if self.use_fused_e8m0_scale else self.weight_scale_group_size
             for gs in (self.input_scale_group_size, weight_group_size):

@@ -37,7 +37,7 @@ public:
 
   static constexpr uint32_t kPartMmaShapeK = 256 / ElementA::kBits;
   static constexpr uint32_t kSwizzleBytes = ElementA::kBits * BlockShape::K >= 1024 ? 128 : 64;
-  static constexpr uint32_t kNumWarpShapeNSplits = WarpShape::N == ElementA::kBits * 2 ? 2 : 1;
+  static constexpr uint32_t kNumWarpShapeNSplits = !Ctx::kUsePackedKLayout && WarpShape::N == ElementA::kBits * 2 ? 2 : 1;
 
   static constexpr bool kUsePackedKLayout = Ctx::kUsePackedKLayout;
   static constexpr uint32_t kPackedKFactor = Ctx::kPackedKFactor;
@@ -114,7 +114,7 @@ public:
     uint32_t buffer_id = iter_id % 2;
 
     const uint32_t smem_base = cast_smem_ptr_to_uint(&ctx.smem);
-    constexpr uint32_t kItersPerHalf = kWarpIters / kPackedKFactor;
+    constexpr uint32_t kItersPerHalf = kUsePackedKLayout ? 1 : kWarpIters;
     constexpr uint32_t kNumIters = kUsePackedKLayout ? 1 : (WarpShape::N / (MmaShape::N / 4) / kPackedKFactor);
     constexpr uint32_t kRunKLoop = kUsePackedKLayout ? kNumKSlabs : kPackedKFactor;
 
