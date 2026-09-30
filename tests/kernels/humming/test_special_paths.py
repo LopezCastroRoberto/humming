@@ -1,3 +1,5 @@
+import dataclasses
+
 import pytest
 import torch
 from torch._dynamo.testing import CompileCounterWithBackend
@@ -283,23 +285,19 @@ def test_special_weight_path_coverage():
 @pytest.mark.parametrize("a_dtype", [dtypes.float8e4m3, dtypes.int8])
 def test_packed_k_fused_scale_geometry(monkeypatch, warp_k, warp_n, k_warps, use_warp_spec, a_dtype):
     skip_if_unsupported(a_dtype=a_dtype, mma_type="wgmma")
-    config = _layer_config(
-        a_dtype=a_dtype,
-        b_dtype=dtypes.float4e2m1,
-        bs_dtype=dtypes.float8e8m0,
-        input_scale_group_size=128,
-        weight_scale_group_size=32,
-        num_experts=33,
-        mma_type=MmaType.WGMMA,
-        use_packed_k_layout=True,
+    case = next(
+        case
+        for _, case in SPECIAL_WEIGHT_CASES
+        if case.layer_config.use_packed_k_layout
+        and case.layer_config.use_fused_e8m0_scale
+        and case.layer_config.a_dtype == a_dtype
+        and case.layer_config.input_scale_group_size == 128
+        and case.layer_config.weight_scale_group_size == 32
+        and case.compute_config.gemm_type == GemmType.GROUPED_CONTIGUOUS
     )
-    case = KernelTestCase(
-        name="packed-k-fused-scale-geometry",
-        layer_config=config,
-        compute_config=ComputeConfig(gemm_type=GemmType.GROUPED_CONTIGUOUS, use_m_major_input_scale=True),
-        top_k=2,
-        seed=2026,
-    )
+    layer = dataclasses.replace(case.layer_config, num_experts=33)
+    compute = dataclasses.replace(case.compute_config, use_m_major_input_scale=True)
+    case = dataclasses.replace(case, layer_config=layer, compute_config=compute)
     tuning = dict(
         block_shape=(64, warp_n * 4, warp_k * k_warps),
         warp_shape=(64, warp_n, warp_k),
