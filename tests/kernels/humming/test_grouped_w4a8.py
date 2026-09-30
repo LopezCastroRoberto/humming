@@ -60,11 +60,15 @@ def test_grouped_w4a8_selects_specialized_schedule_automatically():
     )
     for shape_m in (4096, None):
         selected = get_heuristics_config(
-            layer, shape_m=shape_m, use_m_major_input_scale=True,
+            layer,
+            shape_m=shape_m,
+            use_m_major_input_scale=True,
             gemm_type=GemmType.GROUPED_CONTIGUOUS,
         )
         generic = get_heuristics_config(
-            layer, shape_m=shape_m, use_m_major_input_scale=False,
+            layer,
+            shape_m=shape_m,
+            use_m_major_input_scale=False,
             gemm_type=GemmType.GROUPED_CONTIGUOUS,
         )
         selected_config = selected if shape_m is not None else selected[0][2]
@@ -129,6 +133,7 @@ def test_grouped_mxfp4_fp8_m_major(shape_m, num_experts, top_k):
     block_m, block_n, block_k = results[0].tuning_config.block_shape
     assert 64 <= block_m <= 176 and block_m % 16 == 0
     assert (block_n, block_k) == (128, 128)
+    assert results[0].tuning_config.raster_group_m == (8 if block_m >= 160 else 16)
 
 
 @pytest.mark.parametrize("shape_n, shape_k", [(4096, 6144), (6144, 2048)])
@@ -154,7 +159,7 @@ def test_glm52_grouped_w4a8_shape_policy(shape_n, shape_k):
     )
     assert configs[0][0] == 0
     assert configs[-1][1] == 1 << 30
-    assert all(left[1] == right[0] for left, right in zip(configs, configs[1:]))
+    assert all(left[1] == right[0] for left, right in zip(configs, configs[1:], strict=False))
     expected = {
         1024: (64, 5),
         3072: (128, 4),

@@ -328,7 +328,7 @@ def _set_w4a8_config(config: dict, block_m: int) -> None:
         use_shared_as_promotion=True,
         use_stream_k=False,
         use_packed_k_layout=False,
-        raster_group_m=1,
+        raster_group_m=8 if block_m >= 160 else 16,
         multi_cast_size_a=1,
         multi_cast_size_b=1,
     )
@@ -343,11 +343,7 @@ def apply_w4a8_config(
 ) -> None:
     if not _w4a8_enabled(layer_config, use_m_major_input_scale, gemm_type):
         return
-    block_m = (
-        _w4a8_block_m(layer_config, shape_m)
-        if _w4a8_uses_variable_m_tiles()
-        else _W4A8_MAX_TILE_M
-    )
+    block_m = _w4a8_block_m(layer_config, shape_m) if _w4a8_uses_variable_m_tiles() else _W4A8_MAX_TILE_M
     _set_w4a8_config(config, block_m)
 
 
@@ -369,14 +365,10 @@ def specialize_w4a8_ranges(
     tuned_configs = []
     for lower, upper, base_config in configs:
         cuts = [lower, *(x for x in boundaries if lower < x < upper), upper]
-        for interval_lower, interval_upper in zip(cuts, cuts[1:]):
+        for interval_lower, interval_upper in zip(cuts, cuts[1:], strict=False):
             config = dict(base_config)
             _set_w4a8_config(config, _w4a8_block_m(layer_config, interval_upper))
-            if (
-                tuned_configs
-                and tuned_configs[-1][1] == interval_lower
-                and tuned_configs[-1][2] == config
-            ):
+            if tuned_configs and tuned_configs[-1][1] == interval_lower and tuned_configs[-1][2] == config:
                 tuned_configs[-1][1] = interval_upper
             else:
                 tuned_configs.append([interval_lower, interval_upper, config])

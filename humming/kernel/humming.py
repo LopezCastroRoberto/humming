@@ -495,7 +495,6 @@ class HummingKernel(KernelRuntime, LayerConfig, ComputeConfig, TuningConfig):
             assert self.use_warp_spec and self.is_grouped_contiguous_gemm
             assert not self.use_stream_k
             assert self.multi_cast_size_a == self.multi_cast_size_b == 1
-            assert self.raster_group_m == 1
         if self.use_shared_as_promotion:
             assert self.use_warp_spec and self.mma_type == MmaType.WGMMA
             assert self.use_m_major_input_scale and not self.use_packed_k_layout

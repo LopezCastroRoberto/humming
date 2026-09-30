@@ -52,7 +52,6 @@ private:
   uint32_t dp_mn_total_iters;
   uint32_t dp_mn_iters;
   uint32_t dp_mn_next_index;
-  int32_t flat_current_iter = -1;
 
 public:
   Ctx &ctx;
@@ -87,8 +86,7 @@ public:
   Scheduler(Ctx &ctx) : ctx(ctx) {
     static_assert(!kUseFlatGroupedRaster ||
                   (kIsGroupedContiguousGemm && !kUseStreamK &&
-                   kNumCtasDimN == 1 && kNumCtasDimM == 1 &&
-                   kRasterGroupM == 1));
+                   kNumCtasDimN == 1 && kNumCtasDimM == 1));
 
     if constexpr (kIsGroupedGemm && Ctx::kUseTmaC) {
       if (threadIdx.x == 0) ctx.smem.tensor_map_buffer[0] = reinterpret_cast<const CUtensorMap *>(ctx.params.c)[0];
@@ -235,18 +233,7 @@ public:
 
   CUDA_INLINE
   void map_mn_block(uint32_t mn_index, uint32_t &m_id, uint32_t &n_id) {
-    if constexpr (kUseFlatGroupedRaster) {
-      // Raster N across an 8- or 16-tile M group for L2 locality. The last
-      // group can be shorter, so N uses its actual M-tile count.
-      constexpr uint32_t group_m = BlockShape::M >= 160 ? 8 : 16;
-      const uint32_t blocks_per_group = group_m * N_BLOCKS;
-      const uint32_t group_id = mn_index / blocks_per_group;
-      const uint32_t first_m = group_id * group_m;
-      const uint32_t actual_group_m = MIN(group_m, m_blocks - first_m);
-      const uint32_t in_group = mn_index - group_id * blocks_per_group;
-      m_id = first_m + in_group % actual_group_m;
-      n_id = in_group / actual_group_m;
-    } else if constexpr (kRasterGroupM <= 1 || !kIsDenseGemm) {
+    if constexpr (kRasterGroupM <= 1 || !(kIsDenseGemm || kUseFlatGroupedRaster)) {
       m_id = mn_index / N_BLOCKS;
       n_id = mn_index % N_BLOCKS;
     } else {
@@ -262,16 +249,6 @@ public:
 
   CUDA_INLINE
   bool get_next_block() {
-    if constexpr (kUseFlatGroupedRaster) {
-      const uint32_t mn_index =
-          static_cast<uint32_t>(++flat_current_iter) * gridDim.x + blockIdx.x;
-      if (mn_index >= mn_blocks) return false;
-      map_mn_block(mn_index, m_block_id, n_block_id);
-      k_block_id = 0;
-      slice_iters = K_BLOCKS;
-      fetch_moe_group_block();
-      return true;
-    }
     bool has_next_block = false;
     if (dp_mn_iters) {
       slice_iters = K_BLOCKS;
