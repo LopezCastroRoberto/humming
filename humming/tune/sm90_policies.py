@@ -325,7 +325,6 @@ def _set_w4a8_config(config: dict, block_m: int) -> None:
         warp_shape=(block_m, 16, 128),
         num_stages=5 if block_m == 64 else 4,
         use_warp_spec=True,
-        use_flat_grouped_raster=True,
         use_shared_as_promotion=True,
         use_stream_k=False,
         use_packed_k_layout=False,

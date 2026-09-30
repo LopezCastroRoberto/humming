@@ -73,11 +73,11 @@ def test_grouped_w4a8_selects_specialized_schedule_automatically():
         )
         selected_config = selected if shape_m is not None else selected[0][2]
         generic_config = generic if shape_m is not None else generic[0][2]
-        assert selected_config["use_flat_grouped_raster"]
-        assert not generic_config.get("use_flat_grouped_raster", False)
+        assert selected_config["raster_group_m"] in (8, 16)
+        assert generic_config.get("raster_group_m", 1) == 1
 
 
-def test_flat_grouped_raster_storage_is_opt_in():
+def test_grouped_raster_storage_depends_on_raster_group_m():
     layer = LayerConfig(
         sm_version=90,
         shape_n=4096,
@@ -92,8 +92,8 @@ def test_flat_grouped_raster_storage_is_opt_in():
     )
     args = (layer, (176, 128, 128), GemmType.GROUPED_CONTIGUOUS, 4)
     generic = estimate_smem_size_layer(*args)
-    assert generic == estimate_smem_size_layer(*args, use_flat_grouped_raster=False)
-    assert estimate_smem_size_layer(*args, use_flat_grouped_raster=True) > generic
+    assert generic == estimate_smem_size_layer(*args, raster_group_m=1)
+    assert estimate_smem_size_layer(*args, raster_group_m=8) > generic
 
 
 @pytest.mark.parametrize("num_experts", [4, 8, 16, 32, 64, 128, 256, 512, 33])
@@ -128,7 +128,6 @@ def test_grouped_mxfp4_fp8_m_major(shape_m, num_experts, top_k):
     )
     results = KernelTestRunner(case).run(shape_ms=[shape_m])
     assert len(results) == 1
-    assert results[0].tuning_config.use_flat_grouped_raster
     assert results[0].tuning_config.use_shared_as_promotion
     block_m, block_n, block_k = results[0].tuning_config.block_shape
     assert 64 <= block_m <= 176 and block_m % 16 == 0

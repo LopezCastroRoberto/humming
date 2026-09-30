@@ -306,8 +306,7 @@ def test_packed_k_fused_scale_geometry(monkeypatch, warp_k, warp_n, k_warps, use
         num_stages=3,
         use_warp_spec=use_warp_spec,
         use_stream_k=False,
-        use_flat_grouped_raster=use_warp_spec,
-        raster_group_m=8 if use_warp_spec else 1,
+        raster_group_m=8,
         multi_cast_size_a=1,
         multi_cast_size_b=1,
     )

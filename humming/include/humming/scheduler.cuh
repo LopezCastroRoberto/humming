@@ -15,7 +15,6 @@ private:
   static constexpr bool kIsIndexedGemm = Ctx::kIsIndexedGemm;
   static constexpr bool kIsGroupedGemm = Ctx::kIsGroupedGemm;
   static constexpr bool kIsGroupedContiguousGemm = Ctx::kIsGroupedContiguousGemm;
-  static constexpr bool kUseFlatGroupedRaster = Ctx::TuningConfig::kUseFlatGroupedRaster;
   static constexpr uint32_t kNumExperts = Ctx::kNumExperts;
   static constexpr uint32_t kNumThreads = Ctx::kNumThreads;
   static constexpr uint32_t kNumMathThreads = Ctx::kNumMathThreads;
@@ -38,6 +37,7 @@ private:
   static constexpr uint32_t K_BLOCKS = ProblemShape::K / BlockShape::K;
 
   static constexpr uint32_t kRasterGroupM = Ctx::kRasterGroupM;
+  static constexpr bool kUseGroupedRaster = kIsGroupedContiguousGemm && kRasterGroupM > 1;
   static constexpr uint32_t kNumStages = Ctx::TuningConfig::kNumStages;
 
   static constexpr int32_t ct_gcd(int32_t a, int32_t b) { return b == 0 ? a : ct_gcd(b, a % b); }
@@ -84,10 +84,6 @@ public:
 
   CUDA_INLINE
   Scheduler(Ctx &ctx) : ctx(ctx) {
-    static_assert(!kUseFlatGroupedRaster ||
-                  (kIsGroupedContiguousGemm && !kUseStreamK &&
-                   kNumCtasDimN == 1 && kNumCtasDimM == 1));
-
     if constexpr (kIsGroupedGemm && Ctx::kUseTmaC) {
       if (threadIdx.x == 0) ctx.smem.tensor_map_buffer[0] = reinterpret_cast<const CUtensorMap *>(ctx.params.c)[0];
       __syncwarp();
@@ -174,7 +170,7 @@ public:
       if constexpr (kUseCpAsync) cp_async_wait_group<0>();
       __syncthreads();
 
-      if constexpr (kUseFlatGroupedRaster) {
+      if constexpr (kUseGroupedRaster) {
         // Build the per-expert prefix of M tiles for a persistent, flat
         // grouped raster. Each warp lane owns one expert per 32-expert chunk.
         if (threadIdx.x < 32) {
@@ -184,8 +180,7 @@ public:
             const uint32_t expert = base + lane;
             uint32_t tokens = 0;
             if (expert < kNumExperts) {
-              const uint32_t next_offset = expert + 1 < kNumExperts
-                  ? ctx.smem.expert_offset[expert + 1] : ctx.params.shape_m;
+              const uint32_t next_offset = ctx.smem.expert_offset[expert + 1];
               tokens = next_offset - ctx.smem.expert_offset[expert];
               ctx.smem.expert_tokens[expert] = tokens;
             }
@@ -233,7 +228,7 @@ public:
 
   CUDA_INLINE
   void map_mn_block(uint32_t mn_index, uint32_t &m_id, uint32_t &n_id) {
-    if constexpr (kRasterGroupM <= 1 || !(kIsDenseGemm || kUseFlatGroupedRaster)) {
+    if constexpr (kRasterGroupM <= 1 || !(kIsDenseGemm || kUseGroupedRaster)) {
       m_id = mn_index / N_BLOCKS;
       n_id = mn_index % N_BLOCKS;
     } else {
@@ -321,7 +316,7 @@ public:
 
   CUDA_INLINE
   void fetch_moe_group_block() {
-    if constexpr (kUseFlatGroupedRaster) {
+    if constexpr (kUseGroupedRaster) {
       uint32_t lower = 0;
       uint32_t upper = kNumExperts;
       PRAGMA_UNROLL

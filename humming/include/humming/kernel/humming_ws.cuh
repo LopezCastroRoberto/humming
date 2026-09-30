@@ -72,7 +72,6 @@ __global__ __launch_bounds__(TuningConfig::kNumThreads, TuningConfig::kNumCtasPe
   using S2RMemoryPipeline = S2RMemoryPipeline<Ctx, MMA, Epilogue>;
   constexpr uint32_t kAccumulatorRegistersPerThread = sizeof(typename MMA::CRegistersArrayType) / sizeof(uint32_t) * (MMA::final_regs_c_index() + 1);
   constexpr bool kUseRegisterReallocation = TuningConfig::kNumMathThreads > 128 || ProblemShape::K > BlockShape::K * 16;
-  static_assert(!TuningConfig::kUseFlatGroupedRaster || Ctx::kIsGroupedContiguousGemm);
   static_assert(!TuningConfig::kUseSharedASPromotion || Ctx::kUseWgmma);
   static_assert(Ctx::kWarpIters >= 2, "warp-specialized mainloop requires at least two warp iterations");
 
@@ -134,10 +133,7 @@ __global__ __launch_bounds__(TuningConfig::kNumThreads, TuningConfig::kNumCtasPe
         if constexpr (kNumStages == 2) {
           producer.load_stage(stage_id, remaining_iters > kNumStages);
         } else {
-          constexpr uint32_t target_stage = TuningConfig::kUseFlatGroupedRaster
-              ? (stage_id + kNumStages - 1) % kNumStages
-              : stage_id + kNumStages - 1;
-          producer.load_stage(target_stage, remaining_iters >= kNumStages);
+          producer.load_stage(stage_id + kNumStages - 1, remaining_iters >= kNumStages);
         }
       };
 

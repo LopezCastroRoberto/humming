@@ -79,6 +79,11 @@ when present, must cover warp K. Weight scale groups must also cover warp K unle
 scale before WGMMA, so GS32 weights can use warp K64 or K128. Fused packed-K
 remains opt-in; the default layout selection is unchanged.
 
+`raster_group_m` controls M tile grouping for dense and grouped-contiguous GEMMs.
+For grouped-contiguous GEMMs, values greater than 1 automatically use an expert
+tile prefix table and binary lookup, allowing M tile IDs to move backwards as N
+advances. A value of 1 uses the existing forward warp scan without the prefix table.
+
 ### Pipeline and Synchronization
 
 | Parameter | Description |

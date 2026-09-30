@@ -465,7 +465,6 @@ class TuningConfig(BaseHummingConfig):
     raster_group_m: int = 1
 
     # Warp-specialized scheduling and GS128 scale-promotion/mainloop policies.
-    use_flat_grouped_raster: bool = False
     use_shared_as_promotion: bool = False
 
     _cpp_extra_names: ClassVar[tuple[str, ...]] = (
