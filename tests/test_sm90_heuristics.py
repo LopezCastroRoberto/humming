@@ -375,6 +375,7 @@ def test_grouped_w4a8_ranges_match_direct_selection(monkeypatch, device_name, nu
     monkeypatch.setattr("humming.tune.sm90_policies.torch.cuda.get_device_name", lambda: device_name)
     monkeypatch.setattr("humming.tune.get_heuristics_class", lambda **kwargs: Sm90Heuristics)
     layer = _layer(shape_n, shape_k, num_experts=num_experts)
+    assert layer.use_packed_k_layout
     select = _get_heuristics_config.__wrapped__
     kwargs = dict(use_m_major_input_scale=True, gemm_type=GemmType.GROUPED_CONTIGUOUS)
     ranges = select(layer, **kwargs)
@@ -382,6 +383,8 @@ def test_grouped_w4a8_ranges_match_direct_selection(monkeypatch, device_name, nu
     previous_upper = 0
     for lower, upper, config in ranges:
         assert lower == previous_upper and lower < upper
+        assert config["use_packed_k_layout"]
+        assert config["warp_shape"][1] == 32
         for shape_m in (lower + 1, min(upper, lower + num_experts * 2048)):
             assert select(layer, shape_m=shape_m, **kwargs) == config
         previous_upper = upper

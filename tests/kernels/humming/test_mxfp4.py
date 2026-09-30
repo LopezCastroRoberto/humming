@@ -159,9 +159,13 @@ def test_mxfp4(expected_fused, test_case):
     assert config.use_fused_e8m0_scale is expected_fused
     assert config.is_group_weight_scale
     assert config.is_tensor_weight_scale_2 is expected_fused
+    if test_case.uses_m_major_input_scale:
+        assert config.use_packed_k_layout
 
     skip_if_unsupported(a_dtype=config.a_dtype, mma_type=config.mma_type.value)
     results = KernelTestRunner(test_case).run()
+    if test_case.uses_m_major_input_scale:
+        assert all(result.tuning_values["use_packed_k_layout"] for result in results)
     assert_kernel_test_shape_coverage(results)
 
 

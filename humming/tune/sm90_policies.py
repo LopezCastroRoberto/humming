@@ -154,6 +154,10 @@ def build_sm90_seed_config(problem: TuningProblem) -> dict:
         warp_shape_k = min(warp_shape_k, block_shape_k)
         assert block_shape_k >= warp_shape_k
 
+    if problem.gemm_type == GemmType.INDEXED and layer_config.use_packed_k_layout:
+        while block_shape_n // warp_shape_n * (block_shape_k // warp_shape_k) > 8:
+            block_shape_k //= 2
+
     dense_small_fp4 = (
         problem.gemm_type == GemmType.DENSE
         and layer_config.a_dtype.num_bits == 16
@@ -265,9 +269,9 @@ def select_grouped_scale(
     )
 
 
-# MXFP4 x FP8(GS128) grouped-prefill Hopper schedule. The variable-M
-# tile policy was measured on H200; other SM90 devices use M176.
-_W4A8_MAX_TILE_M = 176
+# Packed MXFP4 x FP8(GS128) grouped-prefill Hopper schedule. The variable-M
+# tile policy was measured on H200; other SM90 devices use M96.
+_W4A8_MAX_TILE_M = 96
 _W4A8_MAX_MODELED_EXPERT_ROWS = 6 * _W4A8_MAX_TILE_M
 
 
@@ -303,7 +307,7 @@ def _w4a8_enabled(
         and layer_config.as_dtype == dtypes.float32
         and layer_config.bs_dtype == dtypes.float8e8m0
         and layer_config.use_fused_e8m0_scale
-        and not layer_config.use_packed_k_layout
+        and layer_config.use_packed_k_layout
         and layer_config.input_scale_group_size == 128
         and layer_config.weight_scale_group_size == 32
         and layer_config.num_experts > 0
@@ -322,12 +326,12 @@ def _w4a8_uses_variable_m_tiles() -> bool:
 def _set_w4a8_config(config: dict, block_m: int) -> None:
     config.update(
         block_shape=(block_m, 128, 128),
-        warp_shape=(block_m, 16, 128),
-        num_stages=5 if block_m == 64 else 4,
+        warp_shape=(block_m, 32, 128),
+        num_stages=4,
         use_warp_spec=True,
         use_stream_k=False,
-        use_packed_k_layout=False,
-        raster_group_m=8 if block_m >= 160 else 16,
+        use_packed_k_layout=True,
+        raster_group_m=16,
         multi_cast_size_a=1,
         multi_cast_size_b=1,
     )
