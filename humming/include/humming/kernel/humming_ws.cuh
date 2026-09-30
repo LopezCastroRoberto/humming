@@ -62,7 +62,7 @@ __global__ __launch_bounds__(TuningConfig::kNumThreads, TuningConfig::kNumCtasPe
       MmaOpClass, ProblemShape, BlockShape, WarpShape, PadShape,
       ElementA, ElementB, ElementC, ElementBS,
       LayerConfig, ComputeConfig, TuningConfig>;
-  using KernelScheduler = Scheduler<Ctx>;
+  using Scheduler = Scheduler<Ctx>;
   using ProducerPipeline = ProducerPipeline<Ctx>;
   using ConsumerPipeline = ConsumerPipeline<Ctx>;
   using MainloopArithmetic = MainloopArithmetic<Ctx>;
@@ -84,7 +84,7 @@ __global__ __launch_bounds__(TuningConfig::kNumThreads, TuningConfig::kNumCtasPe
       tensor_map_buffer, locks};
   auto ctx = Ctx(smem, params);
 
-  auto scheduler = KernelScheduler(ctx);
+  auto scheduler = Scheduler(ctx);
   if (ctx.is_load_thread()) ProducerPipeline::init_mbarrier(ctx);
 
   mbarrier_init_sync<((TuningConfig::kMultiCastSizeA * TuningConfig::kMultiCastSizeB) > 1)>();

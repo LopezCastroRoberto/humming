@@ -84,6 +84,7 @@ public:
 
   CUDA_INLINE
   Scheduler(Ctx &ctx) : ctx(ctx) {
+
     if constexpr (kIsGroupedGemm && Ctx::kUseTmaC) {
       if (threadIdx.x == 0) ctx.smem.tensor_map_buffer[0] = reinterpret_cast<const CUtensorMap *>(ctx.params.c)[0];
       __syncwarp();

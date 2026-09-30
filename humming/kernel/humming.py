@@ -491,6 +491,7 @@ class HummingKernel(KernelRuntime, LayerConfig, ComputeConfig, TuningConfig):
         if self.gemm_type is None and self.num_experts == 0:
             self.gemm_type = GemmType.DENSE
         assert self.gemm_type is not None, "gemm_type must be specify for MoE GEMM"
+
         if self.is_tensor_input_scale:
             self.use_tma_as = False
             self.use_m_major_input_scale = False
