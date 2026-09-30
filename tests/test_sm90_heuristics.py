@@ -370,7 +370,7 @@ def test_fp4_a16_dense_uses_small_tile_only_through_m128():
 
 @pytest.mark.parametrize("device_name", ["H200", "L20X"])
 @pytest.mark.parametrize("num_experts", [8, 33])
-@pytest.mark.parametrize("shape_n,shape_k", [(4096, 6144), (6144, 2048)])
+@pytest.mark.parametrize("shape_n,shape_k", [(4096, 6144), (6144, 2048), (4096, 3072), (4096, 4096)])
 def test_grouped_w4a8_ranges_match_direct_selection(monkeypatch, device_name, num_experts, shape_n, shape_k):
     monkeypatch.setattr("humming.tune.sm90_policies.torch.cuda.get_device_name", lambda: device_name)
     monkeypatch.setattr("humming.tune.get_heuristics_class", lambda **kwargs: Sm90Heuristics)
@@ -385,11 +385,23 @@ def test_grouped_w4a8_ranges_match_direct_selection(monkeypatch, device_name, nu
         assert lower == previous_upper and lower < upper
         assert config["use_packed_k_layout"]
         assert config["warp_shape"][1:] == (16, 128)
-        if device_name == "H200" and lower >= num_experts * 512:
-            assert config["warp_shape"][0] == 176
-            assert config["num_stages"] == 4
         for shape_m in (lower + 1, min(upper, lower + num_experts * 2048)):
             assert select(layer, shape_m=shape_m, **kwargs) == config
         previous_upper = upper
+    for rows, tile in [
+        (128, 144),
+        (144, 160),
+        (160, 176),
+        (256, 144),
+        (288, 160),
+        (320, 176),
+        (512, 176),
+        (640, 176),
+    ]:
+        config = select(layer, shape_m=rows * num_experts, **kwargs)
+        expected_tile = tile if device_name == "H200" else 128
+        assert config["warp_shape"][0] == expected_tile
+        expected_stages = 4 if device_name == "H200" and (tile >= 160 or shape_k > 2048) else 5
+        assert config["num_stages"] == expected_stages
     generic = select(layer, shape_m=4096, gemm_type=GemmType.GROUPED_CONTIGUOUS)
     assert generic.get("raster_group_m", 1) == 1
