@@ -2,6 +2,7 @@ import pytest
 
 from humming import dtypes
 from humming.config import ComputeConfig, GemmType, LayerConfig
+from humming.config.mma import get_default_mma_type
 from humming.testing import (
     KernelTestCase,
     KernelTestRunner,
@@ -42,6 +43,7 @@ B_DTYPES = (
     "float5e2m2",
     "float5e4m0",
     "float6e2m3",
+    "float6e3m2",
     "float6e4m1",
     "float7e0m6",
     "float7e2m4",
@@ -50,6 +52,7 @@ B_DTYPES = (
     "float8e1m6",
     "float8e4m3",
     "float8e5m2",
+    "float8e3m4",
 )
 
 C_DTYPES = ("float16", "bfloat16")
@@ -135,7 +138,7 @@ DATATYPE_CASES = _make_cases()
 def test_datatype(test_case):
     skip_if_unsupported(
         a_dtype=test_case.layer_config.a_dtype,
-        mma_type=test_case.layer_config.mma_type.value,
+        mma_type=get_default_mma_type(test_case.layer_config).value,
     )
     results = KernelTestRunner(test_case).run()
     assert_kernel_test_shape_coverage(results)

@@ -65,11 +65,12 @@ public:
   CUDA_INLINE
   void load_aiu(int4 *smem_ptr) {
     const uint32_t warp_id = ctx.load_thread_id() / 32;
-    if (warp_id < CEIL_DIV(BlockShape::K, 1024 / ElementA::kBits)) {
+    PRAGMA_UNROLL
+    for (uint32_t slab = warp_id; slab < CEIL_DIV(BlockShape::K, 1024 / ElementA::kBits); slab += kNumLoadThreads / 32) {
       aiu_load_gmem<ElementA::kBits>(
-          gmem_ptr_raw, smem_ptr + BlockShape::M * 1024 / 128 * warp_id,
+          gmem_ptr_raw, smem_ptr + BlockShape::M * 1024 / 128 * slab,
           shape_m, ProblemShape::K - PadShape::K,
-          row_offset, col_offset + warp_id * 1024 / ElementA::kBits,
+          row_offset, col_offset + slab * 1024 / ElementA::kBits,
           BlockShape::M, MIN(1024 / ElementA::kBits, BlockShape::K));
     }
   }
@@ -78,7 +79,10 @@ public:
   void load_tma(int4 *smem_ptr, void *mbar_ptr) {
     uint32_t thread_id = ctx.load_thread_id();
     if constexpr (Ctx::kUseUmmaSplitLoads) thread_id -= 32;
-    if (thread_id < kNumTmaLoadsPerLine) {
+    if constexpr (Ctx::kUseWgmmaTmaAPack) {
+      if (thread_id == 0 && (kMultiCastSizeA == 1 || blockIdx.x % kMultiCastSizeA == 0))
+        tma_load_3d<kMultiCastSizeA>(tensor_map_ptr, smem_ptr, mbar_ptr, 0, row_offset, col_offset / (1024 / ElementA::kBits));
+    } else if (thread_id < kNumTmaLoadsPerLine) {
       const uint32_t block_idx = thread_id;
       const uint32_t smem_offset = BlockShape::M / Ctx::kUmmaCtaGroupSize * 8 * block_idx;
       const uint32_t col_offset2 = col_offset + (1024 / MAX(ElementA::kBits, 8)) * block_idx;
@@ -95,7 +99,10 @@ public:
     if constexpr (kUseTma) {
       uint32_t thread_id = ctx.load_thread_id();
       if constexpr (Ctx::kUseUmmaSplitLoads) thread_id -= 32;
-      if (thread_id < kNumTmaLoadsPerLine && (kMultiCastSizeA == 1 || blockIdx.x % kMultiCastSizeA == 0)) {
+      if constexpr (Ctx::kUseWgmmaTmaAPack) {
+        if (thread_id == 0 && (kMultiCastSizeA == 1 || blockIdx.x % kMultiCastSizeA == 0))
+          tma_prefetch_3d(tensor_map_ptr, 0, row_offset, col_offset / (1024 / ElementA::kBits));
+      } else if (thread_id < kNumTmaLoadsPerLine && (kMultiCastSizeA == 1 || blockIdx.x % kMultiCastSizeA == 0)) {
         const uint32_t block_idx = thread_id;
         const uint32_t col_offset2 = col_offset + (1024 / MAX(ElementA::kBits, 8)) * block_idx;
         tma_prefetch_2d(tensor_map_ptr, col_offset2, row_offset);

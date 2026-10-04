@@ -45,6 +45,108 @@ SF_DTYPE_MAP = {
 }
 
 
+def get_default_mma_type(layer_config):
+    if layer_config.sm_version // 10 == 9 and layer_config.a_dtype != dtypes.int4:
+        return MmaType.WGMMA
+    if layer_config.use_block_scaled_mma and layer_config.sm_version // 10 == 12:
+        return MmaType.MXMMA
+    has_low_bit_activation = layer_config.a_dtype.num_bits < 16
+    has_bfloat16_input_output = layer_config.a_dtype == layer_config.c_dtype == dtypes.bfloat16
+    prefer_umma = has_low_bit_activation or has_bfloat16_input_output
+    if layer_config.is_umma_supported and prefer_umma:
+        return MmaType.UMMA
+    return MmaType.MMA
+
+
+def get_mxmma_scale_config(layer_config):
+    """Return the scale vector size and dtype used by the generated MXMMA instruction."""
+    mma_shape_k = 256 // layer_config.a_dtype.num_bits
+    group_size = (
+        layer_config.weight_scale_group_size
+        or layer_config.input_scale_group_size
+        or (32 if layer_config.a_dtype.num_bits == 4 else mma_shape_k)
+    )
+    assert mma_shape_k % group_size == 0
+    scale_dtype = (
+        layer_config.bs_dtype
+        if layer_config.is_group_weight_scale or layer_config.is_block_weight_scale
+        else layer_config.as_dtype
+        if layer_config.input_scale_group_size > 0
+        else dtypes.float8e8m0
+    )
+    return mma_shape_k // group_size, scale_dtype
+
+
+def get_mxmma_compiler_error(layer_config, compiler_version):
+    scale_vec, scale_dtype = get_mxmma_scale_config(layer_config)
+    uses_fp4_4x = layer_config.a_dtype.num_bits == 4 and scale_vec == 4
+    if uses_fp4_4x and scale_dtype == dtypes.float8e8m0 and compiler_version < (13, 1):
+        return (
+            "MXMMA kind::mxf4nvf4 with scale_vec::4X and UE8M0 scales "
+            "requires CUDA 13.1 or newer (PTX ISA 9.1)"
+        )
+    return None
+
+
+def get_register_budget_error(layer_config, tuning_config, use_f16_accum=False, registers_per_sm=None):
+    """Return a diagnostic when accumulators and one operand buffer exhaust the budget."""
+    mma_type = tuning_config.mma_type or get_default_mma_type(layer_config)
+    if mma_type == MmaType.UMMA:
+        return None  # UMMA accumulators use TMEM and have separate resource checks.
+    if registers_per_sm is None:
+        registers_per_sm = current_device.max_registers_per_sm
+    warp_m, warp_n, warp_k = tuning_config.warp_shape
+    num_math_threads = math.prod(tuning_config.block_shape) // math.prod(tuning_config.warp_shape) * 32
+    num_threads = num_math_threads + (128 if tuning_config.use_warp_spec else 0)
+    launch_budget = registers_per_sm // (num_threads * tuning_config.num_ctas_per_sm) // 8 * 8
+    accumulator_registers = warp_m * warp_n / (64 if use_f16_accum else 32)
+    has_group_accumulator = (
+        mma_type != MmaType.MXMMA
+        and layer_config.a_dtype.num_bits < 16
+        and (
+            layer_config.input_scale_group_size > 0
+            or (
+                not layer_config.use_fused_e8m0_scale
+                and (layer_config.is_group_weight_scale or layer_config.is_block_weight_scale)
+            )
+        )
+    )
+    math_budget = min(255, launch_budget)
+    if tuning_config.use_warp_spec:
+        # Match humming_ws.cuh's allocation, using the full physical accumulator
+        # count for its preferred budget, independently of our spill estimate.
+        physical_accumulators = accumulator_registers * (2 if has_group_accumulator else 1)
+        preferred_budget = min(232, max(128, physical_accumulators * 2 + 96))
+        needs_more_load_registers = num_math_threads > 256 or (
+            tuning_config.num_ctas_per_sm == 1 and layer_config.a_dtype.num_bits != 16
+        )
+        load_registers = 40 if needs_more_load_registers else 24
+        available_registers = launch_budget * (num_math_threads + 128) - load_registers * 128
+        if num_math_threads > 256:
+            preferred_budget = 96
+        math_budget = min(preferred_budget, max(24, available_registers // num_math_threads // 8 * 8))
+
+    # Each ordinary MMA buffer spans K=256/activation_bits, hence M/4 and N/4
+    # 32-bit registers per thread. Count dequantized operands, not both copies.
+    buffer_registers = (warp_m + warp_n) / 4
+    if mma_type == MmaType.WGMMA:
+        # A is always in smem; raw-weight SS also keeps B in smem.
+        buffer_registers = 0 if layer_config.use_raw_weight else warp_n / 4
+        if not layer_config.use_raw_weight and layer_config.use_packed_k_layout:
+            # The packed B buffer holds one N=64 WGMMA fragment across all K slabs.
+            buffer_registers = warp_k * layer_config.a_dtype.num_bits / 64
+    if has_group_accumulator:
+        accumulator_registers *= 1.25
+    demand = accumulator_registers + buffer_registers
+    if demand >= math_budget - 8:
+        return (
+            f"register budget exceeded: accumulator {accumulator_registers:g} + "
+            f"single-buffer {buffer_registers:g} = {demand:g} must be < "
+            f"math-thread budget {math_budget:g} - 8 ({math_budget - 8:g})"
+        )
+    return None
+
+
 def calc_reg_count(rows, cols, ptx_dtype):
     total_bits = rows * cols * DTYPE_BIT_WIDTH_MAP[ptx_dtype]
     assert total_bits % (32 * 32) == 0
@@ -239,6 +341,10 @@ class WgmmaOpClassImpl:
             f"static void fma(uint64_t &desc, uint32_t *b, {reg_cd_type} *d, bool pred = true) {{",
             *self.generate_ptx(indent=2, has_scale_d=True).strip("\n").split("\n"),
             "};",
+            "CUDA_INLINE",
+            f"static void fma(uint64_t &desc, uint64_t &b_desc, {reg_cd_type} *d, bool pred = true) {{",
+            *self.generate_ptx(indent=2, has_scale_d=True, use_ss=True).strip("\n").split("\n"),
+            "};",
         ]
 
         code = "\n".join("  " + x if x else x for x in lines)
@@ -247,7 +353,7 @@ class WgmmaOpClassImpl:
 
         return code
 
-    def generate_ptx(self, indent=2, has_scale_d=True):
+    def generate_ptx(self, indent=2, has_scale_d=True, use_ss=False):
         a_dtype = self.a_dtype
         b_dtype = self.b_dtype
         cd_dtype = self.cd_dtype
@@ -264,19 +370,21 @@ class WgmmaOpClassImpl:
         start = 0
         end = 0
         param_placeholders_list = []
-        counts = [self.reg_cd_count, self.reg_b_count]
+        counts = [self.reg_cd_count, 1 if use_ss else self.reg_b_count]
         for i in range(len(counts)):
             end += counts[i]
             placeholder_str = ", ".join(f"%{x}" for x in range(start, end))
             param_placeholders_list.append("{" + placeholder_str + "}")
             start += counts[i]
+        if use_ss:
+            param_placeholders_list[1] = f"%{self.reg_cd_count}"
         param_placeholders_list.append(f"%{sum(counts)}")
 
         other_ptx_args = ", p" if has_scale_d else ", 1"
         # The dtype-specific PTX tail args (scale/trans flags) gate on the wgmma-A
         # operand dtype, which after the swap is project's b_dtype.
         if self.b_dtype in ["f16", "bf16"]:
-            other_ptx_args += ", 1, 1, 0"
+            other_ptx_args += ", 1, 1, 0, 0" if use_ss else ", 1, 1, 0"
         elif self.b_dtype in ["e4m3", "e5m2", "e2m1"]:
             other_ptx_args += ", 1, 1"
 
@@ -287,6 +395,8 @@ class WgmmaOpClassImpl:
         cd_params = []
         for i in range(self.reg_b_count):
             b_params.append(f' "r"(b[{i}])')
+        if use_ss:
+            b_params = [' "l"(b_desc)']
         for i in range(self.reg_cd_count):
             t = "f" if cd_dtype == "f32" else "r"
             cd_params.append(f'"+{t}"(d[{i}])')

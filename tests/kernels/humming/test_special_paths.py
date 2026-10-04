@@ -7,6 +7,8 @@ from torch._dynamo.testing import CompileCounterWithBackend
 import humming.testing.runner as runner_module
 from humming import dtypes
 from humming.config import ComputeConfig, GemmType, LayerConfig, MmaType, WeightScale2Type
+from humming.config.mma import get_default_mma_type
+from humming.device import current_device
 from humming.forward import humming_forward
 from humming.testing import (
     KernelTestCase,
@@ -19,6 +21,50 @@ from humming.testing.data import generate_random_tensor
 SHAPE_N = 1024
 SHAPE_K = 1024
 GROUPED_INPUT_SIZE = 128
+
+
+@pytest.mark.parametrize("use_cp_async", (False, True))
+@pytest.mark.parametrize("block_k", (64, 128, 1024))
+@pytest.mark.parametrize("gemm_type", (GemmType.DENSE, GemmType.INDEXED))
+def test_ppu_raw_weight_loading(use_cp_async, block_k, gemm_type, monkeypatch):
+    skip_if_unsupported(a_dtype=dtypes.int8, use_cp_async=use_cp_async)
+    if not current_device.is_ppu:
+        pytest.skip("PPU operand layout and AIU regression")
+    # K=1024 needs eight slabs with four load warps, exercising the AIU slab loops.
+    config = dict(
+        mma_type="mma",
+        block_shape=(32, 64, block_k),
+        warp_shape=(32, 16, block_k),
+        num_stages=2,
+        num_ctas_per_sm=1,
+        use_stream_k=False,
+        use_cp_async=use_cp_async,
+        use_tma=False,
+        use_mbarrier=False,
+    )
+    monkeypatch.setenv("HUMMING_TEST_TUNING_SOURCE", "heuristic")
+    monkeypatch.setattr("humming.testing.tuning.get_heuristics_config", lambda *args, **kwargs: config)
+    case = KernelTestCase(
+        name="ppu-raw-weight-loading",
+        layer_config=LayerConfig(
+            shape_n=256,
+            shape_k=2048,
+            pad_shape_n=24,
+            pad_shape_k=32,
+            a_dtype=dtypes.int8,
+            b_dtype=dtypes.int8,
+            c_dtype=dtypes.float16,
+            num_experts=0 if gemm_type == GemmType.DENSE else 4,
+            has_bias=True,
+        ),
+        compute_config=ComputeConfig(gemm_type=gemm_type),
+        top_k=1 if gemm_type == GemmType.DENSE else 2,
+        seed=2026,
+    )
+    shape_ms = (1, 17, 64)
+    results = KernelTestRunner(case).run(shape_ms)
+    assert_kernel_test_shape_coverage(results, shape_ms)
+
 
 SPECIAL_FEATURES = {
     "use_int_weight_scale",
@@ -109,7 +155,7 @@ SPECIAL_WEIGHT_CASES = (
             bs_dtype=dtypes.bfloat16,
             weight_scale_group_size=128,
             weight_scale_group_size_n=1,
-            mma_type=MmaType.WGMMA,
+            sm_version=90,
         ),
     ),
     _kernel_case(
@@ -143,7 +189,7 @@ SPECIAL_WEIGHT_CASES = (
             bs_dtype=dtypes.bfloat16,
             input_scale_group_size=GROUPED_INPUT_SIZE,
             weight_scale_group_size=128,
-            mma_type=MmaType.WGMMA,
+            sm_version=90,
         ),
     ),
     _kernel_case(
@@ -155,7 +201,7 @@ SPECIAL_WEIGHT_CASES = (
             bs_dtype=dtypes.bfloat16,
             weight_scale_group_size=128,
             weight_scale_group_size_n=1,
-            mma_type=MmaType.WGMMA,
+            sm_version=90,
         ),
     ),
     _kernel_case(
@@ -167,7 +213,7 @@ SPECIAL_WEIGHT_CASES = (
             bs_dtype=dtypes.bfloat16,
             weight_scale_group_size=128,
             has_zero_point=True,
-            mma_type=MmaType.WGMMA,
+            sm_version=90,
         ),
     ),
     *(
@@ -184,7 +230,7 @@ SPECIAL_WEIGHT_CASES = (
                 if input_group_size == 0
                 else WeightScale2Type.TENSOR,
                 num_experts=0 if gemm_type == GemmType.DENSE else 8,
-                mma_type=MmaType.WGMMA,
+                sm_version=90,
                 use_packed_k_layout=True,
             ),
             gemm_type=gemm_type,
@@ -246,7 +292,7 @@ def test_forward_fullgraph():
 )
 def test_special_weight_path(required_features, test_case):
     config = test_case.layer_config
-    if "use_fused_e8m0_scale" in required_features and config.mma_type == MmaType.MXMMA:
+    if "use_fused_e8m0_scale" in required_features and get_default_mma_type(config) == MmaType.MXMMA:
         pytest.skip("fused E8M0 scale is not supported by MXMMA")
 
     for feature in required_features:
@@ -254,7 +300,7 @@ def test_special_weight_path(required_features, test_case):
     if "use_int_weight_scale" in required_features or "use_fused_e8m0_scale" in required_features:
         assert config.weight_scale_2_type != WeightScale2Type.NONE
 
-    skip_if_unsupported(a_dtype=config.a_dtype, mma_type=config.mma_type.value)
+    skip_if_unsupported(a_dtype=config.a_dtype, mma_type=get_default_mma_type(config).value)
     results = KernelTestRunner(test_case).run()
     assert_kernel_test_shape_coverage(results)
 
@@ -332,3 +378,72 @@ def test_packed_k_geometry(
     )
     results = KernelTestRunner(case).run(shape_ms=[17, 257])
     assert_kernel_test_shape_coverage(results, [17, 257])
+
+
+@pytest.mark.parametrize(
+    "mma_type,block_m,chunk_rows,shape_n,gemm_type,use_tma,cta_group_size",
+    (
+        ("mma", 128, 96, 512, GemmType.DENSE, True, 1),
+        ("mma", 128, 96, 504, GemmType.DENSE, True, 1),
+        ("mma", 64, 32, 512, GemmType.INDEXED, False, 1),
+        ("mma", 128, 96, 512, GemmType.GROUPED_CONTIGUOUS, True, 1),
+        ("mma", 128, 96, 504, GemmType.GROUPED_MASKED, True, 1),
+        ("mma", 64, 128, 512, GemmType.DENSE, True, 1),
+        ("wgmma", 128, 96, 512, GemmType.DENSE, True, 1),
+        ("wgmma", 128, 96, 504, GemmType.GROUPED_CONTIGUOUS, True, 1),
+        ("umma", 48, 32, 512, GemmType.DENSE, True, 2),
+        ("umma", 80, 64, 504, GemmType.DENSE, True, 1),
+        ("umma", 80, 64, 512, GemmType.GROUPED_CONTIGUOUS, True, 1),
+        ("umma", 48, 32, 504, GemmType.GROUPED_MASKED, True, 2),
+        ("umma", 80, 64, 512, GemmType.INDEXED, False, 1),
+        ("umma", 24, 64, 512, GemmType.DENSE, True, 1),
+        ("umma", 48, 0, 512, GemmType.GROUPED_CONTIGUOUS, True, 2),
+        ("umma", 128, 96, 512, GemmType.DENSE, True, 2),
+    ),
+)
+def test_output_chunk_rows(
+    mma_type, block_m, chunk_rows, shape_n, gemm_type, use_tma, cta_group_size, monkeypatch
+):
+    """Cover N slab stores, descriptor bounds, buffer reuse, scatter, and K reduction."""
+    skip_if_unsupported(a_dtype=dtypes.bfloat16, mma_type=mma_type, use_tma=use_tma)
+    layer = LayerConfig(
+        shape_n=512,
+        pad_shape_n=512 - shape_n,
+        shape_k=1024,
+        a_dtype=dtypes.bfloat16,
+        b_dtype=dtypes.uint4,
+        c_dtype=dtypes.bfloat16,
+        weight_scale_group_size=128,
+        has_bias=True,
+        num_experts=0 if gemm_type == GemmType.DENSE else 4,
+    )
+    if mma_type == "umma" and not layer.is_umma_supported:
+        pytest.skip("UMMA requires SM10x or SM11x")
+    is_umma = mma_type == "umma"
+    is_mma = mma_type == "mma"
+    # Keep N=256 slab coverage without exhausting registers or SM120 shared memory.
+    block_k = 128 if is_umma else 64
+    config = dict(
+        mma_type=mma_type,
+        block_shape=(block_m, 256, block_k),
+        warp_shape=(block_m if is_umma else 64, 32 if is_umma else 64, 128 if is_umma else 64),
+        num_stages=2 if is_mma else 3,
+        num_sms=6,
+        num_ctas_per_sm=1,
+        use_tma=use_tma,
+        use_stream_k=True,
+        smem_reuse_mode="last_stage" if is_mma else "none",
+        umma_cta_group_size=cta_group_size,
+        output_chunk_rows=chunk_rows,
+    )
+    monkeypatch.setenv("HUMMING_TEST_TUNING_SOURCE", "heuristic")
+    monkeypatch.setattr("humming.testing.tuning.get_heuristics_config", lambda *args, **kwargs: config)
+    case = KernelTestCase(
+        name="output-chunk-rows",
+        layer_config=layer,
+        compute_config=ComputeConfig(gemm_type=gemm_type),
+        seed=2026,
+    )
+    shape_ms = (17, 13 * block_m + 1)
+    results = KernelTestRunner(case).run(shape_ms)
+    assert_kernel_test_shape_coverage(results, shape_ms)
