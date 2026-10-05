@@ -375,11 +375,13 @@ def test_sampled_backends_match_fixed_layout(
     monkeypatch,
 ):
     from humming.config import ComputeConfig
-    from humming.device import DeviceInfo
+    from humming.device import DeviceInfo, current_device
     from humming.kernel.humming import HummingKernel
     from humming.testing import tuning
 
-    monkeypatch.setattr(DeviceInfo, "sm_version", property(lambda self: sm_version))
+    if current_device.sm_version != sm_version:
+        pytest.skip(f"Requires SM{sm_version}, got SM{current_device.sm_version}")
+
     monkeypatch.setattr(DeviceInfo, "sm_count", property(lambda self: 132))
     monkeypatch.setattr(DeviceInfo, "is_ppu", property(lambda self: False))
     monkeypatch.setattr(DeviceInfo, "max_registers_per_sm", property(lambda self: 65536))
@@ -414,12 +416,14 @@ def test_sampled_backends_match_fixed_layout(
 
 
 @pytest.mark.parametrize("sample_size", (None, 32))
-def test_sampled_umma_covers_cooperative_and_dequant_options(monkeypatch, sample_size):
+def test_sampled_umma_covers_cooperative_and_dequant_options(sample_size):
     from humming.config import ComputeConfig
-    from humming.device import DeviceInfo
+    from humming.device import current_device
     from humming.testing import tuning
 
-    monkeypatch.setattr(DeviceInfo, "sm_version", property(lambda self: 103))
+    if current_device.sm_version != 103:
+        pytest.skip(f"Requires SM103, got SM{current_device.sm_version}")
+
     layer = LayerConfig(
         sm_version=103,
         shape_n=512,
@@ -476,7 +480,11 @@ def test_output_chunk_rows_rejects_invalid_heights(output_chunk_rows):
 def test_umma_architecture_selection(sm_version, a_dtype, b_dtype, small_m_backend, monkeypatch):
     from humming.config import MmaType
     from humming.config.mma import get_default_mma_type
+    from humming.device import current_device
     from humming.tune.sm100 import Sm100Heuristics
+
+    if current_device.sm_version != sm_version:
+        pytest.skip(f"Requires SM{sm_version}, got SM{current_device.sm_version}")
 
     scale_config = {}
     if a_dtype == dtypes.float4e2m1:
@@ -522,11 +530,13 @@ def test_heuristic_tests_prefer_available_backend(
     sm_version, a_dtype, shape_n, use_f16_accum, expected, monkeypatch, tuning_source
 ):
     from humming.config import ComputeConfig
-    from humming.device import DeviceInfo
+    from humming.device import DeviceInfo, current_device
     from humming.testing import tuning
 
+    if current_device.sm_version != sm_version:
+        pytest.skip(f"Requires SM{sm_version}, got SM{current_device.sm_version}")
+
     monkeypatch.setenv("HUMMING_TEST_TUNING_SOURCE", tuning_source)
-    monkeypatch.setattr(DeviceInfo, "sm_version", property(lambda self: sm_version))
     monkeypatch.setattr(DeviceInfo, "is_ppu", property(lambda self: False))
     layer = LayerConfig(
         shape_n=shape_n,
@@ -565,8 +575,11 @@ def test_sampled_wgmma_accounts_for_all_accumulators(
     warp_m, warp_n, group_size, num_ctas, expected, monkeypatch
 ):
     from humming.config import ComputeConfig
-    from humming.device import DeviceInfo
+    from humming.device import DeviceInfo, current_device
     from humming.testing import tuning
+
+    if current_device.sm_version != 90:
+        pytest.skip(f"Requires SM90, got SM{current_device.sm_version}")
 
     monkeypatch.setattr(DeviceInfo, "max_registers_per_sm", property(lambda self: 65536))
     monkeypatch.setattr(DeviceInfo, "max_threads_per_sm", property(lambda self: 2048))
@@ -672,11 +685,13 @@ def test_mxmma_compiler_version_matches_scale_format(
     import humming.kernel.humming as kernel_module
     import humming.testing.runner as runner_module
     from humming.config import ComputeConfig, TuningConfig
-    from humming.device import DeviceInfo
+    from humming.device import current_device
     from humming.kernel.humming import HummingKernel
     from humming.testing import KernelTestCase, KernelTestRunner, skip_if_unsupported
 
-    monkeypatch.setattr(DeviceInfo, "sm_version", property(lambda self: sm_version))
+    if current_device.sm_version != sm_version:
+        pytest.skip(f"Requires SM{sm_version}, got SM{current_device.sm_version}")
+
     monkeypatch.setattr(kernel_module, "_cuda_compiler_version", lambda _: compiler_version)
     monkeypatch.setattr(runner_module, "_cuda_compiler_version", lambda _: compiler_version)
     monkeypatch.setattr(HummingKernel, "_instances", {})
