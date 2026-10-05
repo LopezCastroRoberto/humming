@@ -47,7 +47,7 @@ private:
 
   static constexpr uint32_t kInputScaleGroupSize = kIsGroupInputScale ? Ctx::kInputScaleGroupSize : 1;
   static constexpr uint32_t kWeightScaleGroupSize = kIsGroupOrBlockWeightScale ? Ctx::kWeightScaleGroupSize : 1;
-  static constexpr uint32_t kNumZPGroupsPerMma = kUseMxmma && ElementA::kBits == 4 && kIsGroupWeightScale ? kPartMmaShapeK / kWeightScaleGroupSize : 1;
+  static constexpr uint32_t kNumZPGroupsPerMma = Ctx::kUseBlockScaledMma && ElementA::kBits == 4 && kIsGroupWeightScale ? kPartMmaShapeK / kWeightScaleGroupSize : 1;
 
   static constexpr bool kUsePackedKLayout = Ctx::kUsePackedKLayout;
   static constexpr uint32_t kPackedKFactor = Ctx::kPackedKFactor;
@@ -247,7 +247,7 @@ public:
       is_last_iter = (k + 1 == kNumKSlabs);
     } else {
       k_index = iter_id * kPartMmaShapeK + (k + 1) * MmaShape::K;
-      is_last_iter = iter_id == (Ctx::kWarpIters - 1);
+      is_last_iter = k_index == WarpShape::K;
     }
     uint32_t is_as_group_end = kIsGroupInputScale && k_index % kInputScaleGroupSize == 0;
     constexpr bool kProcessGroupWeightScale = kIsGroupWeightScale && !kUseFusedE8m0Scale;
@@ -347,9 +347,11 @@ public:
         constexpr uint32_t kFullPackets = kNumBSPerGroup / 4;
         constexpr uint32_t kTailScales = kNumBSPerGroup % 4;
 
-        PRAGMA_UNROLL
-        for (uint32_t i = 0; i < kFullPackets; i++)
-          dq_bs_vals[i] = F8Conversion<ElementBS>::num42float4(bs_vals[i]);
+        if constexpr (kFullPackets > 0) {
+          PRAGMA_UNROLL
+          for (uint32_t i = 0; i < kFullPackets; i++)
+            dq_bs_vals[i] = F8Conversion<ElementBS>::num42float4(bs_vals[i]);
+        }
 
         if constexpr (kTailScales != 0) {
           uint32_t packed = 0;
@@ -388,7 +390,7 @@ public:
 
     uint32_t buffer_id = iter_id % 2;
     uint32_t k_index = iter_id * kPartMmaShapeK + (k + 1) * MmaShape::K;
-    uint32_t is_last_iter = iter_id == (Ctx::kWarpIters - 1);
+    uint32_t is_last_iter = k_index == WarpShape::K;
     uint32_t is_as_group_end = kApplyGroupInputScaleOnC && k_index % kInputScaleGroupSize == 0;
     uint32_t is_bs_group_end = (kApplyGroupWeightScaleOnC || kApplyBlockWeightScaleOnC) && k_index % kWeightScaleGroupSize == 0;
 
@@ -517,7 +519,7 @@ public:
       is_last_iter = (k + 1 == kNumKSlabs);
     } else {
       k_index = iter_id * kPartMmaShapeK + (k + 1) * MmaShape::K;
-      is_last_iter = iter_id == (Ctx::kWarpIters - 1);
+      is_last_iter = k_index == WarpShape::K;
     }
     uint32_t is_as_group_end = kApplyGroupInputScaleOnC && k_index % kInputScaleGroupSize == 0;
     uint32_t is_bs_group_end = (kApplyGroupWeightScaleOnC || kApplyBlockWeightScaleOnC) && k_index % kWeightScaleGroupSize == 0;
@@ -635,6 +637,6 @@ public:
 
   template <class T = uint32_t>
   CUDA_INLINE T *regs_zp_as_ptr(uint32_t buffer_id) {
-    return reinterpret_cast<T *>(zp[buffer_id]);
+    return reinterpret_cast<T *>(zp[kIsChannelWeightScale ? 0 : buffer_id]);
   };
 };
