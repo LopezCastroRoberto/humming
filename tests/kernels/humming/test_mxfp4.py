@@ -1,5 +1,7 @@
 """MXFP4 W4A8 coverage with grouped FP8 inputs."""
 
+import json
+
 import pytest
 import torch
 
@@ -77,7 +79,7 @@ def _case(
         compute_config=ComputeConfig(gemm_type=gemm_type, use_m_major_input_scale=use_m_major_input_scale),
         top_k=1 if is_dense else top_k,
         seed=2026,
-        atol=0.5 if use_m_major_input_scale else 0.05,
+        atol=0.5 if use_m_major_input_scale and gemm_type == GemmType.GROUPED_CONTIGUOUS else 0.05,
     )
 
 
@@ -148,6 +150,21 @@ MXFP4_CASES = (
             (32, 6144, 2048),
         )
     ),
+    *(
+        (
+            True,
+            _case(
+                f"mxfp4-m-major-masked-n{shape_n}-k{shape_k}",
+                shape_n=shape_n,
+                shape_k=shape_k,
+                gemm_type=GemmType.GROUPED_MASKED,
+                num_experts=8,
+                top_k=2,
+                use_m_major_input_scale=True,
+            ),
+        )
+        for shape_n, shape_k in ((1024, 1024), (4096, 6144), (6144, 2048))
+    ),
 )
 
 
@@ -185,6 +202,66 @@ def test_mxfp4_case_coverage():
         dtypes.bfloat16,
         dtypes.float8e4m3,
     }
+
+
+@pytest.mark.parametrize("capacity", [160, 193])
+def test_mxfp4_masked_graph_replay_counts(capacity):
+    from humming.forward import may_process_input
+    from humming.layer import HummingLayer
+    from humming.testing import random_fill_tensor
+    from humming.tune import get_heuristics_config
+
+    skip_if_unsupported(a_dtype=dtypes.float8e4m3, mma_type="wgmma")
+    experts, shape_n, shape_k = 8, 1024, 1024
+    layer = HummingLayer(
+        shape_n=shape_n,
+        shape_k=shape_k,
+        num_experts=experts,
+        weight_config={"dtype": "float4e2m1", "group_size": 32, "scale_dtype": "float8e8m0"},
+        input_config={"dtype": "float8e4m3", "group_size": 128},
+        torch_dtype=torch.bfloat16,
+    ).cuda()
+    for tensor in layer.parameters():
+        random_fill_tensor(tensor)
+    layer.transform()
+    inputs = torch.randn((experts * capacity, shape_k), device="cuda", dtype=torch.bfloat16)
+    inputs, scales, _ = may_process_input(layer.humming_config, inputs, m_major_scale=True)
+    counts = torch.tensor([0, 1, 63, 64, 65, 127, 128, capacity], device="cuda", dtype=torch.int32)
+    tuning = json.dumps(
+        get_heuristics_config(
+            layer_config=layer.humming_config,
+            gemm_type=GemmType.GROUPED_MASKED,
+            use_m_major_input_scale=True,
+        )
+    )
+    compute = json.dumps({"gemm_type": "grouped_masked", "use_m_major_input_scale": True})
+
+    def run():
+        return layer(
+            inputs=inputs,
+            input_scale=scales,
+            expert_layout=counts,
+            valid_shape_m=experts * 128,
+            compute_config=compute,
+            tuning_config=tuning,
+        )
+
+    stream = torch.cuda.Stream()
+    stream.wait_stream(torch.cuda.current_stream())
+    with torch.cuda.stream(stream):
+        for _ in range(3):
+            run()
+    torch.cuda.current_stream().wait_stream(stream)
+    graph = torch.cuda.CUDAGraph()
+    with torch.cuda.graph(graph):
+        captured = run()
+    for pattern in ([0] * experts, [capacity, 0, 65, 1, 128, 63, 64, 0], [1] * experts):
+        counts.copy_(torch.tensor(pattern, device="cuda", dtype=torch.int32))
+        expected = run()
+        graph.replay()
+        torch.cuda.synchronize()
+        valid = (torch.arange(capacity, device="cuda")[None, :] < counts[:, None]).flatten()
+        torch.testing.assert_close(captured[valid], expected[valid], atol=0, rtol=0)
 
 
 @pytest.mark.parametrize("checkpoint_format", ["mxfp4-pack-quantized", "float-quantized"])

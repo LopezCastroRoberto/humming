@@ -330,7 +330,7 @@ def _w4a8_enabled(
     gemm_type: GemmType,
 ) -> bool:
     return (
-        gemm_type == GemmType.GROUPED_CONTIGUOUS
+        gemm_type in (GemmType.GROUPED_CONTIGUOUS, GemmType.GROUPED_MASKED)
         and layer_config.sm_version == 90
         and layer_config.shape_n % 128 == 0
         and use_m_major_input_scale
@@ -379,6 +379,9 @@ def apply_w4a8_config(
 ) -> None:
     if not _w4a8_enabled(layer_config, use_m_major_input_scale, gemm_type):
         return
+    if gemm_type == GemmType.GROUPED_MASKED:
+        _apply_masked_w4a8_config(config, layer_config)
+        return
     use_h200_policy = _w4a8_uses_variable_m_tiles()
     block_m = _w4a8_block_m(layer_config, shape_m) if use_h200_policy else _W4A8_DEFAULT_TILE_M
     _set_w4a8_config(config, block_m, layer_config.shape_k if use_h200_policy else 0)
@@ -391,6 +394,11 @@ def specialize_w4a8_ranges(
     gemm_type: GemmType,
 ) -> list:
     if not _w4a8_enabled(layer_config, use_m_major_input_scale, gemm_type):
+        return configs
+
+    if gemm_type == GemmType.GROUPED_MASKED:
+        for _, _, config in configs:
+            _apply_masked_w4a8_config(config, layer_config)
         return configs
 
     if not _w4a8_uses_variable_m_tiles():
@@ -410,6 +418,19 @@ def specialize_w4a8_ranges(
             else:
                 tuned_configs.append([interval_lower, interval_upper, config])
     return tuned_configs
+
+
+def _apply_masked_w4a8_config(config: dict, layer_config: LayerConfig) -> None:
+    # Preserve the generic small-M policy, including its Stream-K choice.
+    # The caller's valid_shape_m hint, not capacity, should select this range.
+    block_m = config["block_shape"][0]
+    if block_m < 64:
+        return
+    block_m = 64 if block_m < 128 else 128
+    _set_w4a8_config(config, block_m, layer_config.shape_k)
+    # Masked inputs retain fixed-capacity expert offsets and the existing
+    # live-count scheduler. Contiguous expert-prefix rastering is not used.
+    config["raster_group_m"] = 1
 
 
 def _indexed_a16_ctas_per_sm(
