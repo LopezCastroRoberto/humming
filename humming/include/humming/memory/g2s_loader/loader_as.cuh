@@ -64,6 +64,7 @@ public:
   uint32_t load_row_index[kRowLoadIters];
   uint32_t col_offset = 0;
   uint32_t counter = 0;
+  uint4 indexed_scale_cache[kRowLoadIters];
 
   CUDA_INLINE
   G2SMemoryLoaderAS(Ctx &ctx)
@@ -200,7 +201,30 @@ public:
 
   CUDA_INLINE void load_legacy(void *smem_ptr) {
     uint32_t thread_id = ctx.load_thread_id();
-    if constexpr (!kIsIndexedGemm && (kMMajorInputScale || kIsChannelScale)) {
+    if constexpr (kIsIndexedGemm && !kSecondary && Ctx::kUsePackedLateAS &&
+                  !Ctx::kUseMBarrier && !kUseWarpSpec && !Ctx::kUseStreamK &&
+                  kProblemNumGroups % 4 == 0 && kNumGroups == 1) {
+      // Gather four consecutive K-group scales per routed row, then reuse them
+      // across four stages. No Stream-K means seek starts at group zero; the
+      // row stride is vector-aligned and the final vector cannot cross a row.
+      // The non-mbarrier consumer's CTA barrier publishes these ordinary stores.
+      const uint32_t component = col_offset % 4;
+      PRAGMA_UNROLL
+      for (uint32_t i = 0; i < kRowLoadIters; ++i) {
+        const uint32_t row = i * kNumLoadThreads + thread_id;
+        const uint32_t source_row = load_row_index[i];
+        if (row < BlockShape::M && source_row < shape_m) {
+          if (component == 0) {
+            indexed_scale_cache[i] = *reinterpret_cast<const uint4 *>(
+                gmem_ptr + source_row * kProblemNumGroups);
+          }
+          const uint4 values = indexed_scale_cache[i];
+          reinterpret_cast<uint32_t *>(smem_ptr)[row] =
+              component == 0 ? values.x : component == 1 ? values.y :
+              component == 2 ? values.z : values.w;
+        }
+      }
+    } else if constexpr (!kIsIndexedGemm && (kMMajorInputScale || kIsChannelScale)) {
       constexpr uint32_t kWindowNumGroups = kMMajorInputScale ? kNumGroups : 1;
       const uint32_t total_shape_m_vecs = total_shape_m / kScaleMAlignment;
       const int4 *gmem_ptr_load = reinterpret_cast<const int4 *>(gmem_ptr);

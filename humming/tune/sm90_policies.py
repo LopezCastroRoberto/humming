@@ -345,6 +345,45 @@ def _w4a8_enabled(
     )
 
 
+def apply_indexed_w4a8_config(
+    config: dict,
+    layer_config: LayerConfig,
+    gemm_type: GemmType,
+) -> None:
+    """Select the packed GS128 mainloop while preserving indexed row gathering."""
+    if not (
+        gemm_type == GemmType.INDEXED
+        and layer_config.sm_version == 90
+        and layer_config.shape_n % 128 == 0
+        and get_default_mma_type(layer_config) == MmaType.WGMMA
+        and layer_config.a_dtype == dtypes.float8e4m3
+        and layer_config.b_dtype == dtypes.float4e2m1
+        and layer_config.as_dtype == dtypes.float32
+        and layer_config.bs_dtype == dtypes.float8e8m0
+        and layer_config.use_fused_e8m0_scale
+        and layer_config.use_packed_k_layout
+        and layer_config.input_scale_group_size == 128
+        and layer_config.weight_scale_group_size == 32
+        and layer_config.num_experts > 0
+        and not config.get("use_f16_accum", False)
+    ):
+        return
+
+    block_m = min(config["block_shape"][0], 128)
+    # Preserve the small-M schedule, where its wider K stage remains faster.
+    if block_m < 64:
+        return
+    config.update(
+        block_shape=(block_m, 128, 128),
+        warp_shape=(block_m, 16, 128),
+        num_stages=4,
+        use_warp_spec=False,
+        use_mbarrier=False,
+        use_tma=False,
+        use_stream_k=False,
+    )
+
+
 def _w4a8_block_m(layer_config: LayerConfig, shape_m: int) -> int:
     rows_per_expert = (shape_m + layer_config.num_experts - 1) // layer_config.num_experts
     return _w4a8_tile_m_for_expert_rows(rows_per_expert)
