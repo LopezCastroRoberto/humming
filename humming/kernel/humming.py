@@ -22,6 +22,8 @@ from humming.config.mma import (
     get_mxmma_compiler_error,
     get_mxmma_scale_config,
     get_register_budget_error,
+    supports_undocumented_fp_dtypes,
+    uses_undocumented_fp_operand,
 )
 from humming.device import current_device, get_device_index
 from humming.jit.runtime import KernelRuntime
@@ -403,6 +405,9 @@ class HummingKernel(KernelRuntime, LayerConfig, ComputeConfig, TuningConfig):
         }
         assert self.a_dtype in dtype_map
         assert self.sm_version >= dtype_map[self.a_dtype]
+        if uses_undocumented_fp_operand(self.a_dtype, self.b_dtype):
+            err_msg = f"SM{self.sm_version} does not support E3M4/E0M3 operands"
+            assert supports_undocumented_fp_dtypes(self.sm_version), err_msg
         assert self.b_dtype.num_bits <= 8
         assert self.b_dtype.num_bits <= self.a_dtype.num_bits
         if self.b_dtype.is_integer_type and self.a_dtype.is_integer_type:
