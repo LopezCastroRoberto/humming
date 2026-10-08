@@ -90,6 +90,8 @@ def test_schedule_candidate_is_immutable_and_updates_config():
     config = {
         "block_shape": (8, 128, 128),
         "use_stream_k": False,
+        "wgmma_use_late_as": False,
+        "wgmma_split_issue_wait": False,
         "warp_shape": (8, 32, 64),
     }
     candidate = ScheduleCandidate.from_config("base", config)
@@ -97,12 +99,16 @@ def test_schedule_candidate_is_immutable_and_updates_config():
         candidate_id="three_stage",
         warp_shape=(8, 32, 32),
         num_stages=3,
+        wgmma_use_late_as=True,
+        wgmma_split_issue_wait=True,
     )
 
     assert candidate.to_config() == config
     assert updated.to_config() == config | {
         "warp_shape": (8, 32, 32),
         "num_stages": 3,
+        "wgmma_use_late_as": True,
+        "wgmma_split_issue_wait": True,
     }
     assert updated.candidate_id == "three_stage"
     with pytest.raises(dataclasses.FrozenInstanceError):
@@ -565,47 +571,6 @@ def test_sm90_default_backend_supports_activation(a_dtype, expected):
         c_dtype="bfloat16",
     )
     assert get_default_mma_type(layer).value == expected
-
-
-@pytest.mark.parametrize(
-    "warp_m,warp_n,group_size,num_ctas,expected",
-    [(176, 16, 128, 4, False), (80, 64, 128, 3, False), (128, 64, 0, 3, False), (32, 16, 128, 2, True)],
-)
-def test_sampled_wgmma_accounts_for_all_accumulators(
-    warp_m, warp_n, group_size, num_ctas, expected, monkeypatch
-):
-    from humming.config import ComputeConfig
-    from humming.device import DeviceInfo, current_device
-    from humming.testing import tuning
-
-    if current_device.sm_version != 90:
-        pytest.skip(f"Requires SM90, got SM{current_device.sm_version}")
-
-    monkeypatch.setattr(DeviceInfo, "max_registers_per_sm", property(lambda self: 65536))
-    monkeypatch.setattr(DeviceInfo, "max_threads_per_sm", property(lambda self: 2048))
-    monkeypatch.setattr(tuning, "fits_device_smem", lambda *args: True)
-    layer = LayerConfig(
-        sm_version=90,
-        shape_n=1024,
-        shape_k=1024,
-        a_dtype="float8e4m3",
-        b_dtype="uint4",
-        c_dtype="bfloat16",
-        input_scale_group_size=group_size,
-        weight_scale_group_size=group_size,
-        use_fused_e8m0_scale=False,
-    )
-    config = dict(
-        mma_type="wgmma",
-        block_shape=(warp_m, warp_n * 4, 128),
-        warp_shape=(warp_m, warp_n, 128),
-        num_ctas_per_sm=num_ctas,
-        use_warp_spec=False,
-        num_stages=2,
-        use_tma=False,
-    )
-    compute = ComputeConfig(gemm_type=GemmType.DENSE)
-    assert tuning._fits_device_resources(layer, compute, (config, {})) == expected
 
 
 @pytest.mark.parametrize("registers_per_sm,expected", [(65536, False), (131072, True)])

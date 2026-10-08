@@ -289,6 +289,9 @@ def test_special_weight_path_coverage():
         ("mma", 128, 96, 512, GemmType.GROUPED_CONTIGUOUS, True, 1),
         ("mma", 128, 96, 504, GemmType.GROUPED_MASKED, True, 1),
         ("mma", 64, 128, 512, GemmType.DENSE, True, 1),
+        ("wgmma", 128, 0, 512, GemmType.DENSE, True, 1),
+        ("wgmma", 128, 0, 512, GemmType.GROUPED_CONTIGUOUS, True, 1),
+        ("wgmma", 128, 0, 504, GemmType.GROUPED_MASKED, True, 1),
         ("wgmma", 128, 96, 512, GemmType.DENSE, True, 1),
         ("wgmma", 128, 96, 504, GemmType.GROUPED_CONTIGUOUS, True, 1),
         ("umma", 48, 32, 512, GemmType.DENSE, True, 2),
@@ -336,6 +339,8 @@ def test_output_chunk_rows(
         umma_cta_group_size=cta_group_size,
         output_chunk_rows=chunk_rows,
     )
+    if mma_type == "wgmma":
+        config["use_warp_spec"] = True
     monkeypatch.setenv("HUMMING_TEST_TUNING_SOURCE", "heuristic")
     monkeypatch.setattr("humming.testing.tuning.get_heuristics_config", lambda *args, **kwargs: config)
     case = KernelTestCase(

@@ -136,22 +136,48 @@ __global__ __launch_bounds__(TuningConfig::kNumThreads, TuningConfig::kNumCtasPe
       if (remaining_iters == 1) producer.load_channel();
       PRAGMA_UNROLL
       for (uint32_t warp_iter_id = 0; warp_iter_id < Ctx::kWarpIters; warp_iter_id++) {
-        if constexpr (Ctx::kWarpIters == 1) {
-          mma.run(stage_id, warp_iter_id);
-          __syncthreads();
-          if constexpr (kNumStages > 2) {
-            producer.load_stage(stage_id + kNumStages - 1, remaining_iters >= kNumStages);
+        if constexpr (Ctx::kWgmmaSplitIssueWait) {
+          mma.issue(stage_id, warp_iter_id);
+          if constexpr (Ctx::kWarpIters == 1) {
+            // Refill a different stage; the current WGMMA stage stays live until wait.
+            __syncthreads();
+            if constexpr (kNumStages > 2)
+              producer.load_stage(stage_id + kNumStages - 1, remaining_iters >= kNumStages);
           }
-        }
-        if (warp_iter_id == Ctx::kWarpIters - 1 && remaining_iters > 1) {
-          consumer.wait_stage((stage_id + 1) % kNumStages);
-        }
-        s2r_pipe.load_stage_iter(stage_id, warp_iter_id + 1);
-        if constexpr (Ctx::kWarpIters > 1) mma.run(stage_id, warp_iter_id);
-        if (Ctx::kWarpIters > 1 && warp_iter_id == Ctx::kWarpIters - 2) {
-          __syncthreads();
-          if constexpr (kNumStages > 2) {
-            producer.load_stage(stage_id + kNumStages - 1, remaining_iters >= kNumStages);
+          if (warp_iter_id == Ctx::kWarpIters - 1 && remaining_iters > 1)
+            consumer.wait_stage((stage_id + 1) % kNumStages);
+          const bool use_late_scale_prefetch = Ctx::kUseWgmmaLateScalePrefetch && warp_iter_id == Ctx::kWarpIters - 1;
+          if (use_late_scale_prefetch)
+            s2r_pipe.load_stage_iter_data(stage_id, warp_iter_id + 1);
+          else
+            s2r_pipe.load_stage_iter(stage_id, warp_iter_id + 1);
+          mma.wait_and_promote(stage_id, warp_iter_id);
+          if (use_late_scale_prefetch)
+            s2r_pipe.load_stage_iter_scales(stage_id, warp_iter_id + 1);
+
+          if (Ctx::kWarpIters > 1 && warp_iter_id == Ctx::kWarpIters - 2) {
+            __syncthreads();
+            if constexpr (kNumStages > 2)
+              producer.load_stage(stage_id + kNumStages - 1, remaining_iters >= kNumStages);
+          }
+        } else {
+          if constexpr (Ctx::kWarpIters == 1) {
+            mma.run(stage_id, warp_iter_id);
+            __syncthreads();
+            if constexpr (kNumStages > 2) {
+              producer.load_stage(stage_id + kNumStages - 1, remaining_iters >= kNumStages);
+            }
+          }
+          if (warp_iter_id == Ctx::kWarpIters - 1 && remaining_iters > 1) {
+            consumer.wait_stage((stage_id + 1) % kNumStages);
+          }
+          s2r_pipe.load_stage_iter(stage_id, warp_iter_id + 1);
+          if constexpr (Ctx::kWarpIters > 1) mma.run(stage_id, warp_iter_id);
+          if (Ctx::kWarpIters > 1 && warp_iter_id == Ctx::kWarpIters - 2) {
+            __syncthreads();
+            if constexpr (kNumStages > 2) {
+              producer.load_stage(stage_id + kNumStages - 1, remaining_iters >= kNumStages);
+            }
           }
         }
         mma.transform_b(
