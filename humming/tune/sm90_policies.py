@@ -322,16 +322,10 @@ _W4A8_EXPERT_ROW_BOUNDARIES = tuple(
 )
 
 
-def _w4a8_enabled(
-    layer_config: LayerConfig,
-    use_m_major_input_scale: bool,
-    gemm_type: GemmType,
-) -> bool:
+def _is_w4a8_moe_layer(layer_config: LayerConfig) -> bool:
     return (
-        gemm_type == GemmType.GROUPED_CONTIGUOUS
-        and layer_config.sm_version == 90
+        layer_config.sm_version == 90
         and layer_config.shape_n % 128 == 0
-        and use_m_major_input_scale
         and get_default_mma_type(layer_config) == MmaType.WGMMA
         and layer_config.a_dtype == dtypes.float8e4m3
         and layer_config.b_dtype == dtypes.float4e2m1
@@ -342,6 +336,47 @@ def _w4a8_enabled(
         and layer_config.input_scale_group_size == 128
         and layer_config.weight_scale_group_size == 32
         and layer_config.num_experts > 0
+    )
+
+
+def _is_grouped_w4a8(
+    layer_config: LayerConfig,
+    use_m_major_input_scale: bool,
+    gemm_type: GemmType,
+) -> bool:
+    return (
+        gemm_type == GemmType.GROUPED_CONTIGUOUS
+        and use_m_major_input_scale
+        and _is_w4a8_moe_layer(layer_config)
+    )
+
+
+def apply_indexed_w4a8_config(
+    config: dict,
+    layer_config: LayerConfig,
+    gemm_type: GemmType,
+) -> None:
+    """Select the packed GS128 mainloop while preserving indexed row gathering."""
+    if (
+        gemm_type != GemmType.INDEXED
+        or not _is_w4a8_moe_layer(layer_config)
+        or config.get("use_f16_accum", False)
+    ):
+        return
+
+    block_m = min(config["block_shape"][0], 128)
+    # Preserve the small-M schedule, where its wider K stage remains faster.
+    if block_m < 64:
+        return
+    config.update(
+        block_shape=(block_m, 128, 128),
+        warp_shape=(block_m, 16, 128),
+        num_stages=4,
+        use_warp_spec=False,
+        wgmma_use_late_as=True,
+        wgmma_split_issue_wait=True,
+        use_tma=False,
+        use_stream_k=False,
     )
 
 
@@ -375,7 +410,7 @@ def apply_w4a8_config(
     gemm_type: GemmType,
     shape_m: int,
 ) -> None:
-    if not _w4a8_enabled(layer_config, use_m_major_input_scale, gemm_type):
+    if not _is_grouped_w4a8(layer_config, use_m_major_input_scale, gemm_type):
         return
     use_h200_policy = _w4a8_uses_variable_m_tiles()
     block_m = _w4a8_block_m(layer_config, shape_m) if use_h200_policy else _W4A8_DEFAULT_TILE_M
@@ -388,7 +423,7 @@ def specialize_w4a8_ranges(
     use_m_major_input_scale: bool,
     gemm_type: GemmType,
 ) -> list:
-    if not _w4a8_enabled(layer_config, use_m_major_input_scale, gemm_type):
+    if not _is_grouped_w4a8(layer_config, use_m_major_input_scale, gemm_type):
         return configs
 
     if not _w4a8_uses_variable_m_tiles():

@@ -48,6 +48,13 @@ private:
   static_assert(BlockShape::M % kScaleMAlignment == 0);
   static_assert(!kUseTma || kScaleBlockM <= 256);
 
+  // One uint4 gather per routed row covers four single-group stages. Stream-K is
+  // excluded so every tile starts on a vector boundary; the plain smem stores
+  // rely on the CTA barrier of the non-mbarrier pipeline.
+  static constexpr bool kUseIndexedScaleCache =
+      kIsIndexedGemm && kIsGroupScale && !kUseMxScale && Ctx::kWgmmaUseLateAS && !Ctx::kUseMBarrier &&
+      !Ctx::kUseStreamK && kNumGroups == 1 && kProblemNumGroups % 4 == 0;
+
   using LoadType = typename LoadTypeChooser<kNumGroups * 4>::Type;
 
 public:
@@ -64,6 +71,7 @@ public:
   uint32_t load_row_index[kRowLoadIters];
   uint32_t col_offset = 0;
   uint32_t counter = 0;
+  uint4 indexed_scale_cache[kRowLoadIters];
 
   CUDA_INLINE
   G2SMemoryLoaderAS(Ctx &ctx)
@@ -87,6 +95,7 @@ public:
       else if constexpr (SharedStorage::kUseUmmaRowMajorSmemInputScale) load_mx_legacy_row_major(smem_ptr);
       else load_mx_legacy(smem_ptr);
     } else if constexpr (kUseTma) load_tma(smem_ptr, mbar_ptr);
+    else if constexpr (kUseIndexedScaleCache) load_legacy_indexed_cached(smem_ptr);
     else load_legacy(smem_ptr);
     if constexpr (kShouldAdvance) advance();
   }
@@ -194,6 +203,23 @@ public:
         if constexpr (kUseMxScale) tma_prefetch_2d(tensor_map_ptr, load_row_offset, col_offset / 4);
         else if constexpr (kIsChannelScale) tma_prefetch_1d(tensor_map_ptr, load_row_offset);
         else tma_prefetch_2d(tensor_map_ptr, load_row_offset, col_offset);
+      }
+    }
+  }
+
+  CUDA_INLINE void load_legacy_indexed_cached(void *smem_ptr) {
+    uint32_t thread_id = ctx.load_thread_id();
+    uint32_t *smem_ptr_load = reinterpret_cast<uint32_t *>(smem_ptr);
+    const uint32_t component = col_offset % 4;
+    PRAGMA_UNROLL
+    for (uint32_t i = 0; i < kRowLoadIters; i++) {
+      uint32_t row = i * kNumLoadThreads + thread_id;
+      uint32_t source_row = load_row_index[i];
+      if (row < BlockShape::M && source_row < shape_m) {
+        if (component == 0)
+          indexed_scale_cache[i] = *reinterpret_cast<const uint4 *>(gmem_ptr + source_row * kProblemNumGroups);
+        const uint4 v = indexed_scale_cache[i];
+        smem_ptr_load[row] = component == 0 ? v.x : component == 1 ? v.y : component == 2 ? v.z : v.w;
       }
     }
   }
