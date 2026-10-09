@@ -397,8 +397,6 @@ def _set_w4a8_config(config: dict, block_m: int, shape_k: int = 0) -> None:
         use_warp_spec=True,
         use_stream_k=False,
         use_packed_k_layout=True,
-        # Late AS and split issue/wait were implied by this schedule before #121
-        # made them opt-in. M176 exceeds the split issue/wait register budget.
         wgmma_use_late_as=True,
         wgmma_split_issue_wait=block_m <= 160,
         raster_group_m=16,
