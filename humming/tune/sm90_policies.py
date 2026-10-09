@@ -400,6 +400,51 @@ def _w4a8_uses_variable_m_tiles() -> bool:
     return "H200" in torch.cuda.get_device_name()
 
 
+# Row-major grouped-contiguous sizes its M tile per expert too. The generic seed
+# sizes tiles from total rows, which leaves seed-schedule holes and M128 tiles that
+# split unevenly routed experts. Below this many rows per expert the seed schedule wins.
+_W4A8_ROW_MAJOR_MIN_EXPERT_ROWS = 64
+# Without TMA for row-major AS, M176 only pays off while one tile covers the expert.
+_W4A8_ROW_MAJOR_MAX_SINGLE_TILE_ROWS = 176
+
+
+def _w4a8_row_major_tile_m(rows_per_expert: int) -> int | None:
+    if rows_per_expert <= _W4A8_ROW_MAJOR_MIN_EXPERT_ROWS:
+        return None
+    block_m = _w4a8_tile_m_for_expert_rows(rows_per_expert)
+    if block_m <= 160:
+        return block_m
+    return 176 if rows_per_expert <= _W4A8_ROW_MAJOR_MAX_SINGLE_TILE_ROWS else _W4A8_DEFAULT_TILE_M
+
+
+def _uses_row_major_w4a8_tiles(use_m_major_input_scale: bool, gemm_type: GemmType) -> bool:
+    return (
+        gemm_type == GemmType.GROUPED_CONTIGUOUS
+        and not use_m_major_input_scale
+        and _w4a8_uses_variable_m_tiles()
+    )
+
+
+def _set_w4a8_row_major_config(config: dict, layer_config: LayerConfig, shape_m: int) -> None:
+    config["wgmma_use_late_as"] = True
+    rows_per_expert = (shape_m + layer_config.num_experts - 1) // layer_config.num_experts
+    block_m = _w4a8_row_major_tile_m(rows_per_expert)
+    if block_m is None:
+        return
+    config.update(
+        block_shape=(block_m, 128, 128),
+        warp_shape=(block_m, 16, 128),
+        num_stages=4,
+        use_warp_spec=True,
+        use_tma=True,
+        use_stream_k=False,
+        wgmma_split_issue_wait=block_m <= 160,
+        multi_cast_size_a=1,
+        multi_cast_size_b=1,
+    )
+    config.pop("raster_group_m", None)
+
+
 def _set_w4a8_config(config: dict, block_m: int, shape_k: int = 0) -> None:
     config.update(
         block_shape=(block_m, 128, 128),
@@ -427,6 +472,9 @@ def apply_packed_w4a8_config(
     """Select the packed MXFP4 x FP8(GS128) schedule for any GEMM type."""
     if not _is_packed_w4a8_layer(layer_config) or config.get("use_f16_accum", False):
         return
+    if _uses_row_major_w4a8_tiles(use_m_major_input_scale, gemm_type):
+        _set_w4a8_row_major_config(config, layer_config, shape_m)
+        return
     if not _uses_m_major_w4a8_tiles(use_m_major_input_scale, gemm_type):
         _set_w4a8_n16_config(config, layer_config, gemm_type, shape_m)
         return
@@ -446,6 +494,13 @@ def _w4a8_range_boundaries(
         if not _w4a8_uses_variable_m_tiles():
             return ()
         return tuple(rows * layer_config.num_experts for rows in _W4A8_EXPERT_ROW_BOUNDARIES)
+    if _uses_row_major_w4a8_tiles(use_m_major_input_scale, gemm_type):
+        rows = {
+            *_W4A8_EXPERT_ROW_BOUNDARIES,
+            _W4A8_ROW_MAJOR_MIN_EXPERT_ROWS,
+            _W4A8_ROW_MAJOR_MAX_SINGLE_TILE_ROWS,
+        }
+        return tuple(sorted(row * layer_config.num_experts for row in rows))
 
     block_m = _w4a8_n16_tile_m(config, gemm_type)
     if gemm_type != GemmType.DENSE or block_m is None:
